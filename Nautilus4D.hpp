@@ -5,6 +5,7 @@
 #include "al/io/al_Imgui.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -54,6 +55,123 @@ public:
 
 		const int startRing = std::max(0, std::min(startRing_, tSteps_ - 1));
 		drawProjectedWindow(g, viewer, startRing, ringCount);
+	}
+
+	// Export a quad soup for the currently displayed ring window.
+	// This is intentionally "data only" so slicing code can remain decoupled.
+	void buildWorldQuadSoup(std::vector<Vec4f>& vertsWorld, std::vector<std::array<int, 4>>& quads) const
+	{
+		const int ringCount = selectiveDisplay_
+			? std::max(1, std::min(visibleRings_, tSteps_))
+			: tSteps_;
+		const int startRing = std::max(0, std::min(startRing_, tSteps_ - 1));
+
+		buildWorldQuadSoupWindow(vertsWorld, quads, startRing, ringCount);
+	}
+
+	// Export centerline samples (world-space) and radius per ring for implicit-volume slicing.
+	void buildWorldCenterlineSamples(std::vector<Vec4f>& centersWorld, std::vector<float>& radii) const
+	{
+		const int ringCount = selectiveDisplay_
+			? std::max(1, std::min(visibleRings_, tSteps_))
+			: tSteps_;
+		const int startRing = std::max(0, std::min(startRing_, tSteps_ - 1));
+
+		buildWorldCenterlineSamplesWindow(centersWorld, radii, startRing, ringCount);
+	}
+
+	void buildWorldCenterlineSamplesWindow(
+		std::vector<Vec4f>& centersWorld,
+		std::vector<float>& radii,
+		int startRing,
+		int ringCount) const
+	{
+		centersWorld.clear();
+		radii.clear();
+
+		if (tSteps_ <= 0)
+		{
+			return;
+		}
+
+		const int ringCountClamped = std::max(1, std::min(ringCount, tSteps_));
+		const int startRingClamped = std::max(0, std::min(startRing, tSteps_ - 1));
+
+		centersWorld.reserve(static_cast<size_t>(ringCountClamped));
+		radii.reserve(static_cast<size_t>(ringCountClamped));
+
+		for (int k = 0; k < ringCountClamped; ++k)
+		{
+			const int ringIdx = (startRingClamped + k) % tSteps_;
+			const float t = ringParamT(ringIdx);
+			const Vec4f centerLocal = getSpiralPoint(t);
+			const float rTube = (a_ * std::exp(tubeGrow_ * t)) * tubeScale_;
+
+			const Vec4f centerWorld = pos + rotationState_.apply(centerLocal);
+			centersWorld.push_back(centerWorld);
+			radii.push_back(rTube);
+		}
+	}
+
+	void buildWorldQuadSoupWindow(
+		std::vector<Vec4f>& vertsWorld,
+		std::vector<std::array<int, 4>>& quads,
+		int startRing,
+		int ringCount) const
+	{
+		vertsWorld.clear();
+		quads.clear();
+
+		if (vertices_.empty() || tSteps_ <= 1 || vSteps_ <= 2)
+		{
+			return;
+		}
+
+		const int ringCountClamped = std::max(1, std::min(ringCount, tSteps_));
+		const int startRingClamped = std::max(0, std::min(startRing, tSteps_ - 1));
+
+		// Like Processing: renderWindow(startRing, ringCount) samples ringCount+1 rings.
+		const int ringsForSoup = ringCountClamped + 1;
+		const int vertsPerRing = vSteps_;
+		const size_t totalVerts = static_cast<size_t>(ringsForSoup) * static_cast<size_t>(vertsPerRing);
+		vertsWorld.reserve(totalVerts);
+
+		// Emit world vertices in (k,v) order for this window.
+		for (int k = 0; k <= ringCountClamped; ++k)
+		{
+			const int r = (startRingClamped + k) % tSteps_;
+			for (int v = 0; v < vSteps_; ++v)
+			{
+				const int localIdx = r * vSteps_ + v;
+				const Vec4f vWorld = pos + rotationState_.apply(vertices_[localIdx]);
+				vertsWorld.push_back(vWorld);
+			}
+		}
+
+		// Build quads between ring k and ring k+1, around v.
+		// Skip longitudinal stitching across the "physical end" (same condition as draw).
+		quads.reserve(static_cast<size_t>(ringCountClamped) * static_cast<size_t>(vSteps_));
+		for (int k = 0; k < ringCountClamped; ++k)
+		{
+			const int actualRingIndex = (startRingClamped + k) % tSteps_;
+			const bool isPhysicalWrap = (actualRingIndex == tSteps_ - 1);
+			if (isPhysicalWrap)
+			{
+				continue;
+			}
+
+			for (int v = 0; v < vSteps_; ++v)
+			{
+				const int vNext = (v + 1) % vSteps_;
+
+				const int a = k * vSteps_ + v;
+				const int b = k * vSteps_ + vNext;
+				const int c = (k + 1) * vSteps_ + vNext;
+				const int d = (k + 1) * vSteps_ + v;
+
+				quads.push_back({a, b, c, d});
+			}
+		}
 	}
 
 	// Minimal ImGui controls to mirror the Processing UI.
@@ -151,6 +269,16 @@ private:
 		c.b = inner.b + t * (outer.b - inner.b);
 		c.a = inner.a + t * (outer.a - inner.a);
 		return c;
+	}
+
+	float ringParamT(int ringIndex) const
+	{
+		if (tSteps_ <= 1)
+		{
+			return 0.0f;
+		}
+		const float u = static_cast<float>(ringIndex) / static_cast<float>(tSteps_ - 1);
+		return u * maxT_;
 	}
 
 	Vec4f getSpiralPoint(float t) const

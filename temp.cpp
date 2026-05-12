@@ -1,7 +1,10 @@
+
+///
+
 #include "al/app/al_App.hpp"
 #include "al/io/al_Imgui.hpp"
 
-#include "4DNautilusHypervolume.hpp"
+#include "Nautilus4D.hpp"
 #include "Fslicer.hpp"
 
 using namespace al;
@@ -10,7 +13,7 @@ using namespace w4d;
 struct FourDApp : public App
 {
 	object4D viewer;
-	NautilusHypervolume4D nautilus;
+	Nautilus4D nautilus;
 
 	enum class RenderMode
 	{
@@ -20,7 +23,7 @@ struct FourDApp : public App
 
 	RenderMode renderMode{RenderMode::Projection};
 	bool splitView{true};
-	w4d::HyperSliceSettings sliceSettings{};
+	w4d::SliceSettings sliceSettings{};
 
 	bool uiVisible{true};
 	bool showWorldAxes{true};
@@ -97,7 +100,7 @@ struct FourDApp : public App
 		{
 			g.viewport(0, 0, fbWidth(), fbHeight());
 
-			nautilus.drawProjectedShadow(g, viewer);
+			nautilus.drawProjected(g, viewer);
 
 			if (showWorldAxes)
 			{
@@ -110,7 +113,7 @@ struct FourDApp : public App
 			{
 				// Left: projection shadow
 				g.viewport(0, 0, fbWidth() / 2, fbHeight());
-				nautilus.drawProjectedShadow(g, viewer);
+				nautilus.drawProjected(g, viewer);
 				if (showWorldAxes)
 				{
 					w4d::drawWorldAxes(g, viewer);
@@ -125,11 +128,11 @@ struct FourDApp : public App
 			}
 
 			std::vector<Vec4f> vertsWorld;
-			std::vector<std::array<int, 5>> simplices;
-			nautilus.buildWorldSimplices(vertsWorld, simplices);
+			std::vector<std::array<int, 4>> quads;
+			nautilus.buildWorldQuadSoup(vertsWorld, quads);
 
-			const auto slice = w4d::slice4SimplicesViewerLocal(viewer, vertsWorld, simplices, sliceSettings);
-			w4d::drawHyperSlice(g, slice, sliceSettings);
+			const auto slice = w4d::sliceQuadsViewerLocal(viewer, vertsWorld, quads, sliceSettings);
+			w4d::drawSliceResult(g, slice, sliceSettings);
 		}
 
 		// Restore default viewport for UI
@@ -165,7 +168,6 @@ struct FourDApp : public App
 			ImGui::Checkbox("Split view", &splitView);
 			ImGui::SliderFloat("Slice w (viewer-local)", &sliceSettings.wPlane, -25.0f, 25.0f, "%.2f");
 			ImGui::SliderFloat("Slice scale", &sliceSettings.sliceScale, 1.0f, 60.0f, "%.1f");
-			ImGui::Checkbox("Slice edges", &sliceSettings.drawEdges);
 			ImGui::Checkbox("Slice points", &sliceSettings.drawPoints);
 			ImGui::SliderFloat("Slice point size", &sliceSettings.pointSize, 1.0f, 10.0f, "%.1f");
 			ImGui::Separator();
@@ -357,7 +359,3 @@ int main()
 	app.start();
 	return 0;
 }
-
-
-
-
