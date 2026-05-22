@@ -1,11 +1,12 @@
 #include "al/app/al_App.hpp"
 #include "al/io/al_Imgui.hpp"
-
+#include "al/graphics/al_Shapes.hpp"
+// #include "al/io/al_Window.hpp"
 #include "4DNautilusHypervolume.hpp"
 #include "Fslicer.hpp"
 
+
 using namespace al;
-using namespace w4d;
 
 struct FourDApp : public App
 {
@@ -20,7 +21,7 @@ struct FourDApp : public App
 
 	RenderMode renderMode{RenderMode::Projection};
 	bool splitView{true};
-	w4d::HyperSliceSettings sliceSettings{};
+	HyperSliceSettings sliceSettings{};
 
 	bool uiVisible{true};
 	bool showWorldAxes{true};
@@ -46,6 +47,9 @@ struct FourDApp : public App
 		viewer.setRotation(Rotation4D::identity());
 
 		imguiInit();
+
+        //disabling default navigation
+        // al::window().remove(navControl());
 	}
 
 	void onAnimate(double dt) override
@@ -101,7 +105,7 @@ struct FourDApp : public App
 
 			if (showWorldAxes)
 			{
-				w4d::drawWorldAxes(g, viewer);
+				drawWorldAxes(g, viewer);
 			}
 		}
 		else
@@ -113,7 +117,7 @@ struct FourDApp : public App
 				nautilus.drawProjectedShadow(g, viewer);
 				if (showWorldAxes)
 				{
-					w4d::drawWorldAxes(g, viewer);
+					drawWorldAxes(g, viewer);
 				}
 
 				// Right: 3D slice
@@ -128,8 +132,8 @@ struct FourDApp : public App
 			std::vector<std::array<int, 5>> simplices;
 			nautilus.buildWorldSimplices(vertsWorld, simplices);
 
-			const auto slice = w4d::slice4SimplicesViewerLocal(viewer, vertsWorld, simplices, sliceSettings);
-			w4d::drawHyperSlice(g, slice, sliceSettings);
+			const auto slice = slice4SimplicesViewerLocal(viewer, vertsWorld, simplices, sliceSettings);
+			drawHyperSlice(g, slice, sliceSettings);
 		}
 
 		// Restore default viewport for UI
