@@ -92,7 +92,7 @@ public:
         vertsWorld.reserve(verticesLocal_.size());
         for (const auto &vLoc : verticesLocal_)
         {
-            vertsWorld.push_back(pos + rotationState_.apply(vLoc));
+            vertsWorld.push_back(pos + rotationState.apply(vLoc));
         }
 
         simplices = simplices_;
@@ -112,8 +112,8 @@ public:
 
         for (const auto &e : shadowEdges_)
         {
-            const Vec4f aWorld = pos + rotationState_.apply(shadowVertsLocal_[e.first]);
-            const Vec4f bWorld = pos + rotationState_.apply(shadowVertsLocal_[e.second]);
+            const Vec4f aWorld = pos + rotationState.apply(shadowVertsLocal_[e.first]);
+            const Vec4f bWorld = pos + rotationState.apply(shadowVertsLocal_[e.second]);
 
             const Vec4f aLocal = toViewerLocal(viewer, aWorld);
             const Vec4f bLocal = toViewerLocal(viewer, bWorld);

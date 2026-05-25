@@ -3,45 +3,29 @@
 #include "Fmath.hpp"
 
 using namespace al;
-/** Abstract base for 4D objects: position, facing direction, and rotation state.
- *  face is always rotationState.apply(1.f, 0.f, 0.f, 0.f) and is updated whenever
- *  rotation state changes (via setRotation / prependRotation). */
+/*
+ * Abstract base for 4D objects:
+ * position, facing direction, and rotation state.
+ * position is a 4D vector (x, y, z, w).
+ * facing direction is a set of 4 uniform Vec4f,
+ *  default as: FaceRight(1, 0, 0, 0), FaceUp(0, 1, 0, 0), FaceForward(0, 0, -1, 0), FaceAna(0, 0, 0, 1).
+ *  any of the face directions is always rotationState.apply(defaultFaceDirection) and is updated whenever rotation state changes (via setRotation / applyRotation).
+ * Rotation state is a set of 2 uniform quaternions (qL, qR) that represents the rotation in the 4D space.
+ */
+
 class object4D
 {
 public:
     Vec4f pos{0.f, 0.f, 0.f, 0.f};
-    Vec4f face{1.f, 0.f, 0.f, 0.f};
+    Rotation4D rotationState;
+    FaceDirection faceDirection;
 
     object4D() = default;
 
     virtual ~object4D() = default;
 
-    /** Current rotation; read-only. Use setRotation / prependRotation to change. */
-    const Rotation4D &getRotation() const
-    {
-        return rotationState_;
-    }
-
-    /** Set rotation and sync face to rotationState.apply(defaultForward). */
-    void setRotation(const Rotation4D &r)
-    {
-        rotationState_ = r;
-        syncFaceFromRotation();
-    }
-
-    /** Prepend a rotation (apply after current) and sync face. */
-    void prependRotation(const Rotation4D &r)
-    {
-        rotationState_.prepend(r);
-        syncFaceFromRotation();
-    }
-
-    /** Compose rotation on the right (this * r) and sync face. */
-    void appendRotation(const Rotation4D &r)
-    {
-        rotationState_ = rotationState_ * r;
-        syncFaceFromRotation();
-    }
+    void setRotation(const Rotation4D &r) { rotationState = r; }
+    void applyRotation(const Rotation4D &r) { rotationState.prepend(r); }
 
     // --- Movement along axes ---
 
@@ -55,16 +39,13 @@ public:
     }
 
     /** Move by a delta vector (pos += delta). */
-    void moveBy(const Vec4f &delta)
-    {
-        pos += delta;
-    }
+    void moveBy(const Vec4f &delta) { pos += delta; }
 
     // --- Rotation in the 6 cardinal planes ---
 
-    /** Rotate in the plane spanned by two axes. axis1, axis2 in {0,1,2,3} for x,y,z,w.
-     *  angleDeg in degrees, any value (wrapped to [-360, 360] then converted to radians).
-     *  Rotation is prepended (applied in local frame). */
+    /** Rotate in the plane spanned by two axes. axis1, axis2 in {0,1,2,3} for
+     * x,y,z,w. angleDeg in degrees, any value (wrapped to [-360, 360] then
+     * converted to radians). Rotation is accumulated via applyRotation (local frame). */
     void rotatePlane(int axis1, int axis2, float angleDeg)
     {
         float a = std::fmod(angleDeg, 360.f);
@@ -77,20 +58,17 @@ public:
             a += 360.f;
         }
         const float rad = a * (3.14159265358979f / 180.f);
-        prependRotation(Rotation4D::fromPlaneAngle(axis1, axis2, rad));
+        applyRotation(Rotation4D::fromPlaneAngle(axis1, axis2, rad));
     }
 
-protected:
     /** Override in subclasses for custom behaviour. */
     virtual void onRotationChanged() {}
 
-    /** Recompute face from rotationState. Call after any direct mutation of rotationState_. */
+    // Don't call every frame
     void syncFaceFromRotation()
     {
-        face = rotationState_.apply(Vec4f(1.f, 0.f, 0.f, 0.f));
+        faceDirection.updateFaceDirection(rotationState);
+        Vec4f face = rotationState.apply(Vec4f(1.f, 0.f, 0.f, 0.f));
         face.normalize();
-        onRotationChanged();
     }
-
-    Rotation4D rotationState_;
 };

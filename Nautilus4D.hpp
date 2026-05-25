@@ -106,7 +106,7 @@ public:
             const Vec4f centerLocal = getSpiralPoint(t);
             const float rTube = (a_ * std::exp(tubeGrow_ * t)) * tubeScale_;
 
-            const Vec4f centerWorld = pos + rotationState_.apply(centerLocal);
+            const Vec4f centerWorld = pos + rotationState.apply(centerLocal);
             centersWorld.push_back(centerWorld);
             radii.push_back(rTube);
         }
@@ -142,7 +142,7 @@ public:
             for (int v = 0; v < vSteps_; ++v)
             {
                 const int localIdx = r * vSteps_ + v;
-                const Vec4f vWorld = pos + rotationState_.apply(vertices_[localIdx]);
+                const Vec4f vWorld = pos + rotationState.apply(vertices_[localIdx]);
                 vertsWorld.push_back(vWorld);
             }
         }
@@ -407,7 +407,7 @@ private:
                 const size_t winIdx = static_cast<size_t>(k * vSteps_ + v);
 
                 const Vec4f &vLoc = vertices_[localIdx];
-                const Vec4f vWorld = pos + rotationState_.apply(vLoc);
+                const Vec4f vWorld = pos + rotationState.apply(vLoc);
 
                 // 4D -> viewer-local -> 3D.
                 const Vec4f vLocal = toViewerLocal(viewer, vWorld);

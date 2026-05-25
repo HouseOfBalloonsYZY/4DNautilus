@@ -32,6 +32,8 @@ struct FourDApp : public App
 	bool moveUiPos[4]{};
 	bool moveUiNeg[4]{};
 
+	bool rotKeyPos[6]{};
+	bool rotKeyNeg[6]{};
 	bool rotUiPos[6]{};
 	bool rotUiNeg[6]{};
 
@@ -48,8 +50,8 @@ struct FourDApp : public App
 
 		imguiInit();
 
-        //disabling default navigation
-        // al::window().remove(navControl());
+		// Disable Allolib default nav keys; we drive viewer + nav explicitly below.
+		// navControl().disable();
 	}
 
 	void onAnimate(double dt) override
@@ -66,18 +68,23 @@ struct FourDApp : public App
 			if (dir != 0.f)
 			{
 				viewer.move(axis, dir * dMove);
+				// Keep 3D nav in sync for x,y,z (Allolib camera convention).
+				if (axis < 3)
+				{
+					nav().pos()[axis] += dir * dMove;
+				}
 			}
 		}
 
-		// Rotation in 6 cardinal planes: (01,02,03,12,13,23)
+		// Rotation in 6 cardinal planes: XY, XZ, XW, YZ, YW, ZW
 		static const int planeA[6] = {0, 0, 0, 1, 1, 2};
 		static const int planeB[6] = {1, 2, 3, 2, 3, 3};
 
 		for (int i = 0; i < 6; ++i)
 		{
 			float dir = 0.f;
-			if (rotUiPos[i]) dir += 1.f;
-			if (rotUiNeg[i]) dir -= 1.f;
+			if (rotKeyPos[i] || rotUiPos[i]) dir += 1.f;
+			if (rotKeyNeg[i] || rotUiNeg[i]) dir -= 1.f;
 			if (dir != 0.f)
 			{
 				viewer.rotatePlane(planeA[i], planeB[i], dir * dRotDeg);
@@ -175,17 +182,20 @@ struct FourDApp : public App
 			ImGui::Separator();
 		}
 
-		ImGui::Text("Move (click/hold or keys)");
-		ImGui::Text("Keys: D/A (±X), E/Z (±Y), X/W (±Z), C/Q (±W)");
+		ImGui::Text("Move (click/hold or keys, Allolib XYZ)");
+		ImGui::Text("  D/A = +/-X   E/C = +/-Y   W/X = forward/back (-Z/+Z)");
+		ImGui::Text("  R/V = kata/ana (+W/-W, toward/away in 4D)");
 
 		// Movement buttons: rows per axis.
 		drawAxisButtons("X", 0);
 		drawAxisButtons("Y", 1);
 		drawAxisButtons("Z", 2);
-		drawAxisButtons("W", 3);
+		drawAxisButtons("W (4D)", 3);
 
 		ImGui::Separator();
-		ImGui::Text("Rotate planes (click/hold)");
+		ImGui::Text("Rotate planes (click/hold or keys)");
+		ImGui::Text("  Q/Z = XY   arrows L/R = XZ   arrows U/D = YZ");
+		ImGui::Text("  1/2 = XW   3/4 = YW   5/6 = ZW");
 
 		const char* planeLabels[6] = {"XY", "XZ", "XW", "YZ", "YW", "ZW"};
 		for (int i = 0; i < 6; ++i)
@@ -239,11 +249,7 @@ struct FourDApp : public App
 			return true;
 		}
 
-		// Movement keys:
-		//   D = +x, A = -x
-		//   E = +y, Z = -y
-		//   X = +z, W = -z
-		//   C = +w, Q = -w
+		// Translation (Allolib XYZ + R/V for 4D w)
 		switch (key)
 		{
 		case 'd':
@@ -258,37 +264,79 @@ struct FourDApp : public App
 		case 'E':
 			moveKeyPos[1] = true;
 			return true;
-		case 'z':
-		case 'Z':
+		case 'c':
+		case 'C':
 			moveKeyNeg[1] = true;
-			return true;
-		case 'x':
-		case 'X':
-			moveKeyPos[2] = true;
 			return true;
 		case 'w':
 		case 'W':
-			moveKeyNeg[2] = true;
+			moveKeyNeg[2] = true; // forward = -z (Allolib)
 			return true;
-		case 'c':
-		case 'C':
-			moveKeyPos[3] = true;
+		case 'x':
+		case 'X':
+			moveKeyPos[2] = true; // back = +z
 			return true;
+		case 'r':
+		case 'R':
+			moveKeyPos[3] = true; // +w = kata (toward viewer)
+			return true;
+		case 'v':
+		case 'V':
+			moveKeyNeg[3] = true; // -w = ana (away from viewer)
+			return true;
+
+		// Rotation (Allolib spatial planes + 1-6 for w planes)
 		case 'q':
 		case 'Q':
-			moveKeyNeg[3] = true;
+			rotKeyPos[0] = true; // XY (bank)
+			return true;
+		case 'z':
+		case 'Z':
+			rotKeyNeg[0] = true;
+			return true;
+		case Keyboard::LEFT:
+			rotKeyPos[1] = true; // XZ (azimuth)
+			return true;
+		case Keyboard::RIGHT:
+			rotKeyNeg[1] = true;
+			return true;
+		case Keyboard::UP:
+			rotKeyPos[3] = true; // YZ (elevation)
+			return true;
+		case Keyboard::DOWN:
+			rotKeyNeg[3] = true;
+			return true;
+		case '1':
+			rotKeyPos[2] = true; // XW
+			return true;
+		case '2':
+			rotKeyNeg[2] = true;
+			return true;
+		case '3':
+			rotKeyPos[4] = true; // YW
+			return true;
+		case '4':
+			rotKeyNeg[4] = true;
+			return true;
+		case '5':
+			rotKeyPos[5] = true; // ZW
+			return true;
+		case '6':
+			rotKeyNeg[5] = true;
 			return true;
 		default:
 			break;
 		}
 
-		// Reset
+		// Reset viewer + 3D nav
 		if (key == ' ')
 		{
 			viewer.pos = Vec4f(0.f, 0.f, 0.f, 0.f);
 			viewer.setRotation(Rotation4D::identity());
+			nav().halt();
+			nav().pos(0, 0, 10);
+			nav().faceToward(Vec3d(0, 0, 0));
 
-			// Clear all movement / rotation flags so reset is stable.
 			for (int i = 0; i < 4; ++i)
 			{
 				moveKeyPos[i] = moveKeyNeg[i] = false;
@@ -296,6 +344,7 @@ struct FourDApp : public App
 			}
 			for (int i = 0; i < 6; ++i)
 			{
+				rotKeyPos[i] = rotKeyNeg[i] = false;
 				rotUiPos[i] = rotUiNeg[i] = false;
 			}
 
@@ -322,25 +371,64 @@ struct FourDApp : public App
 		case 'E':
 			moveKeyPos[1] = false;
 			return true;
-		case 'z':
-		case 'Z':
+		case 'c':
+		case 'C':
 			moveKeyNeg[1] = false;
-			return true;
-		case 'x':
-		case 'X':
-			moveKeyPos[2] = false;
 			return true;
 		case 'w':
 		case 'W':
 			moveKeyNeg[2] = false;
 			return true;
-		case 'c':
-		case 'C':
+		case 'x':
+		case 'X':
+			moveKeyPos[2] = false;
+			return true;
+		case 'r':
+		case 'R':
 			moveKeyPos[3] = false;
 			return true;
+		case 'v':
+		case 'V':
+			moveKeyNeg[3] = false;
+			return true;
+
 		case 'q':
 		case 'Q':
-			moveKeyNeg[3] = false;
+			rotKeyPos[0] = false;
+			return true;
+		case 'z':
+		case 'Z':
+			rotKeyNeg[0] = false;
+			return true;
+		case Keyboard::LEFT:
+			rotKeyPos[1] = false;
+			return true;
+		case Keyboard::RIGHT:
+			rotKeyNeg[1] = false;
+			return true;
+		case Keyboard::UP:
+			rotKeyPos[3] = false;
+			return true;
+		case Keyboard::DOWN:
+			rotKeyNeg[3] = false;
+			return true;
+		case '1':
+			rotKeyPos[2] = false;
+			return true;
+		case '2':
+			rotKeyNeg[2] = false;
+			return true;
+		case '3':
+			rotKeyPos[4] = false;
+			return true;
+		case '4':
+			rotKeyNeg[4] = false;
+			return true;
+		case '5':
+			rotKeyPos[5] = false;
+			return true;
+		case '6':
+			rotKeyNeg[5] = false;
 			return true;
 		default:
 			break;

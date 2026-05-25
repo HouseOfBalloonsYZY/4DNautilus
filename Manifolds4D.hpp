@@ -20,7 +20,7 @@ using namespace al;
 
 inline Vec4f toViewerLocal(const object4D &viewer, const Vec4f &world)
 {
-    const Rotation4D inv = viewer.getRotation().inverse();
+    const Rotation4D inv = viewer.rotationState.inverse();
     Vec4f rel = world - viewer.pos;
     return inv.apply(rel);
 }
@@ -142,8 +142,8 @@ public:
             const Vec4f &b = vertices_[e.second];
 
             // Transform into world space via this object's rotation and position.
-            Vec4f aWorld = pos + rotationState_.apply(a);
-            Vec4f bWorld = pos + rotationState_.apply(b);
+            Vec4f aWorld = pos + rotationState.apply(a);
+            Vec4f bWorld = pos + rotationState.apply(b);
 
             // Viewer-local coordinates
             Vec4f aLocal = toViewerLocal(viewer, aWorld);
