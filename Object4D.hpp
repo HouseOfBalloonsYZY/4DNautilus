@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Fmath.hpp"
+#include "FMath.hpp"
 
 using namespace al;
 /*

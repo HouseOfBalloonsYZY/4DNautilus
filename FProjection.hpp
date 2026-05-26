@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Fmath.hpp"
+#include "FMath.hpp"
 #include "Object4D.hpp"
 
 #include "al/graphics/al_Graphics.hpp"

@@ -2,7 +2,7 @@
 
 #include <vector>
 
-#include "Fmath.hpp"
+#include "FMath.hpp"
 #include "Object4D.hpp"
 
 #include <cmath>

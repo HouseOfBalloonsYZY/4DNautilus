@@ -4,7 +4,7 @@
 // #include "al/io/al_Window.hpp"
 #include "4DNautilusHypervolume.hpp"
 #include "FProjection.hpp"
-#include "Fslicer.hpp"
+#include "FSlicer.hpp"
 
 
 using namespace al;

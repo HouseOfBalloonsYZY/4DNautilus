@@ -3,7 +3,7 @@
 
 #include "FProjection.hpp"
 #include "Nautilus4D.hpp"
-#include "Fslicer.hpp"
+#include "FSlicer.hpp"
 
 using namespace al;
 
