@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Manifolds4D.hpp"
+#include "Object4D.hpp"
 
 #include "al/io/al_Imgui.hpp"
 
@@ -23,7 +23,7 @@ using namespace al;
 //   - build two orthonormal vectors (n1, n2) orthogonal to tangent
 //   - extrude a growing "tube" hyper-circle around center(t) in the span(n1,n2)
 // ----------------------------------------------------------------------------
-class Nautilus4D : public object4D
+class Nautilus4D : public Object4D
 {
 public:
     Nautilus4D()
@@ -42,18 +42,6 @@ public:
             m3_ = nm3;
             generateGeometry();
         }
-    }
-
-    // Draw either full nautilus or a selective window (matches Processing
-    // `renderWindow(startStep, visibleSteps)` semantics).
-    void drawProjected(al::Graphics &g, const object4D &viewer)
-    {
-        const int ringCount = selectiveDisplay_
-                                  ? std::max(1, std::min(visibleRings_, tSteps_))
-                                  : tSteps_;
-
-        const int startRing = std::max(0, std::min(startRing_, tSteps_ - 1));
-        drawProjectedWindow(g, viewer, startRing, ringCount);
     }
 
     // Export a quad soup for the currently displayed ring window.
@@ -173,6 +161,30 @@ public:
         }
     }
 
+    // Geometry accessors for FProjection.hpp reducers.
+    const std::vector<Vec4f> &verticesLocal() const { return vertices_; }
+    const std::vector<float> &hyperDistsLocal() const { return hyperDists_; }
+    int tSteps() const { return tSteps_; }
+    int vSteps() const { return vSteps_; }
+    bool selectiveDisplay() const { return selectiveDisplay_; }
+    int startRing() const { return startRing_; }
+    int visibleRings() const { return visibleRings_; }
+    bool drawVertexDots() const { return drawVertexDots_; }
+    int pointStride() const { return pointStride_; }
+    float pointSize() const { return pointSize_; }
+
+    int projectionRingCount() const
+    {
+        return selectiveDisplay_
+                   ? std::max(1, std::min(visibleRings_, tSteps_))
+                   : tSteps_;
+    }
+
+    int projectionStartRing() const
+    {
+        return std::max(0, std::min(startRing_, tSteps_ - 1));
+    }
+
     // Minimal ImGui controls to mirror the Processing UI.
     void drawImGuiControls()
     {
@@ -250,24 +262,6 @@ private:
     static float dot4(const Vec4f &a, const Vec4f &b)
     {
         return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
-    }
-
-    static float clamp01(float x)
-    {
-        return std::max(0.0f, std::min(1.0f, x));
-    }
-
-    static al::Color gradientColor(float t)
-    {
-        const al::Color inner(1.f, 1.f, 1.f, 1.f);                    // white
-        const al::Color outer(1.f, 100.f / 255.f, 0.f, 76.f / 255.f); // orange-ish + alpha
-
-        al::Color c;
-        c.r = inner.r + t * (outer.r - inner.r);
-        c.g = inner.g + t * (outer.g - inner.g);
-        c.b = inner.b + t * (outer.b - inner.b);
-        c.a = inner.a + t * (outer.a - inner.a);
-        return c;
     }
 
     float ringParamT(int ringIndex) const
@@ -373,141 +367,4 @@ private:
         }
     }
 
-    void drawProjectedWindow(al::Graphics &g, const object4D &viewer, int startRing, int ringCount)
-    {
-        if (vertices_.empty())
-        {
-            return;
-        }
-
-        const int ringCountClamped = std::max(1, std::min(ringCount, tSteps_));
-        const int startRingClamped = std::max(0, std::min(startRing, tSteps_ - 1));
-
-        // We project ringCount + 1 rings so we can draw the longitudinal edges
-        // between ring k and ring k+1.
-        const int ringsForProj = ringCountClamped + 1;
-        const size_t windowVerts = static_cast<size_t>(ringsForProj) * static_cast<size_t>(vSteps_);
-
-        std::vector<al::Vec3f> proj;
-        proj.resize(windowVerts);
-
-        std::vector<float> dists;
-        dists.resize(windowVerts);
-
-        float minD = std::numeric_limits<float>::max();
-        float maxD = std::numeric_limits<float>::lowest();
-
-        for (int k = 0; k <= ringCountClamped; ++k)
-        {
-            const int r = (startRingClamped + k) % tSteps_;
-
-            for (int v = 0; v < vSteps_; ++v)
-            {
-                const int localIdx = r * vSteps_ + v;
-                const size_t winIdx = static_cast<size_t>(k * vSteps_ + v);
-
-                const Vec4f &vLoc = vertices_[localIdx];
-                const Vec4f vWorld = pos + rotationState.apply(vLoc);
-
-                // 4D -> viewer-local -> 3D.
-                const Vec4f vLocal = toViewerLocal(viewer, vWorld);
-                proj[winIdx] = projectLocal4Dto3D(vLocal);
-
-                const float d = hyperDists_[localIdx];
-                dists[winIdx] = d;
-
-                minD = std::min(minD, d);
-                maxD = std::max(maxD, d);
-            }
-        }
-
-        if (maxD <= minD)
-        {
-            maxD = minD + 1.0f;
-        }
-
-        g.blending(true);
-        g.blendTrans();
-
-        // --------------------------
-        // Tube edge lines
-        // --------------------------
-        al::Mesh lines;
-        lines.primitive(al::Mesh::LINES);
-
-        for (int k = 0; k < ringCountClamped; ++k)
-        {
-            for (int v = 0; v < vSteps_; ++v)
-            {
-                const size_t curr = static_cast<size_t>(k * vSteps_ + v);
-                const size_t nextV = static_cast<size_t>(k * vSteps_ + ((v + 1) % vSteps_));
-                const size_t nextT = static_cast<size_t>((k + 1) * vSteps_ + v);
-
-                const float d = dists[curr];
-                const float t = clamp01((d - minD) / (maxD - minD));
-                const al::Color c = gradientColor(t);
-
-                // Circumferential edge (k,v) -> (k,v+1)
-                lines.color(c);
-                lines.vertex(proj[curr]);
-                lines.color(c);
-                lines.vertex(proj[nextV]);
-
-                // Longitudinal edge (k,v) -> (k+1,v), but avoid connecting across the
-                // "physical end" of the spiral (Processing checks actualRingIndex==tSteps-1).
-                const int actualRingIndex = (startRingClamped + k) % tSteps_;
-                const bool isPhysicalWrap = (actualRingIndex == tSteps_ - 1);
-                if (!isPhysicalWrap)
-                {
-                    lines.color(c);
-                    lines.vertex(proj[curr]);
-                    lines.color(c);
-                    lines.vertex(proj[nextT]);
-                }
-            }
-        }
-
-        // --------------------------
-        // Vertex dots (GL_POINTS)
-        // --------------------------
-        al::Mesh points;
-        if (drawVertexDots_ && pointStride_ > 0)
-        {
-            points.primitive(al::Mesh::POINTS);
-            g.pointSize(pointSize_);
-
-            for (int k = 0; k < ringCountClamped; k += std::max(1, pointStride_))
-            {
-                for (int v = 0; v < vSteps_; v += std::max(1, pointStride_))
-                {
-                    const size_t idx = static_cast<size_t>(k * vSteps_ + v);
-                    if (idx >= windowVerts)
-                    {
-                        continue;
-                    }
-
-                    const float d = dists[idx];
-                    const float t = clamp01((d - minD) / (maxD - minD));
-                    const al::Color c = gradientColor(t);
-
-                    points.color(c);
-                    points.vertex(proj[idx]);
-                }
-            }
-        }
-
-        if (!lines.vertices().empty())
-        {
-            g.meshColor();
-            g.draw(lines);
-        }
-
-        if (drawVertexDots_ && !points.vertices().empty())
-        {
-            g.meshColor();
-            g.draw(points);
-        }
-
-        g.blending(false);
-    }
 };

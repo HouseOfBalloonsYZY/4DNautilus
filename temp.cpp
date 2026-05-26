@@ -1,6 +1,7 @@
 #include "al/app/al_App.hpp"
 #include "al/io/al_Imgui.hpp"
 
+#include "FProjection.hpp"
 #include "Nautilus4D.hpp"
 #include "Fslicer.hpp"
 
@@ -8,7 +9,7 @@ using namespace al;
 
 struct FourDApp : public App
 {
-    object4D viewer;
+    Object4D viewer;
     Nautilus4D nautilus;
 
     enum class RenderMode
@@ -19,6 +20,7 @@ struct FourDApp : public App
 
     RenderMode renderMode{RenderMode::Projection};
     bool splitView{true};
+    ProjectionSettings projectionSettings{};
     SliceSettings sliceSettings{};
 
     bool uiVisible{true};
@@ -100,11 +102,24 @@ struct FourDApp : public App
         {
             g.viewport(0, 0, fbWidth(), fbHeight());
 
-            nautilus.drawProjected(g, viewer);
+            drawNautilusTubeProjected(
+                g,
+                viewer,
+                nautilus,
+                nautilus.verticesLocal(),
+                nautilus.hyperDistsLocal(),
+                nautilus.tSteps(),
+                nautilus.vSteps(),
+                nautilus.projectionStartRing(),
+                nautilus.projectionRingCount(),
+                nautilus.drawVertexDots(),
+                nautilus.pointStride(),
+                nautilus.pointSize(),
+                projectionSettings);
 
             if (showWorldAxes)
             {
-drawWorldAxes(g, viewer);
+                drawWorldAxes(g, viewer, projectionSettings);
             }
         }
         else
@@ -113,10 +128,23 @@ drawWorldAxes(g, viewer);
             {
                 // Left: projection shadow
                 g.viewport(0, 0, fbWidth() / 2, fbHeight());
-                nautilus.drawProjected(g, viewer);
+                drawNautilusTubeProjected(
+                    g,
+                    viewer,
+                    nautilus,
+                    nautilus.verticesLocal(),
+                    nautilus.hyperDistsLocal(),
+                    nautilus.tSteps(),
+                    nautilus.vSteps(),
+                    nautilus.projectionStartRing(),
+                    nautilus.projectionRingCount(),
+                    nautilus.drawVertexDots(),
+                    nautilus.pointStride(),
+                    nautilus.pointSize(),
+                    projectionSettings);
                 if (showWorldAxes)
                 {
-drawWorldAxes(g, viewer);
+                    drawWorldAxes(g, viewer, projectionSettings);
                 }
 
                 // Right: 3D slice

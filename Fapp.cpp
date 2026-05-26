@@ -3,6 +3,7 @@
 #include "al/graphics/al_Shapes.hpp"
 // #include "al/io/al_Window.hpp"
 #include "4DNautilusHypervolume.hpp"
+#include "FProjection.hpp"
 #include "Fslicer.hpp"
 
 
@@ -10,7 +11,7 @@ using namespace al;
 
 struct FourDApp : public App
 {
-	object4D viewer;
+	Object4D viewer;
 	NautilusHypervolume4D nautilus;
 
 	enum class RenderMode
@@ -21,6 +22,7 @@ struct FourDApp : public App
 
 	RenderMode renderMode{RenderMode::Projection};
 	bool splitView{true};
+	ProjectionSettings projectionSettings{};
 	HyperSliceSettings sliceSettings{};
 
 	bool uiVisible{true};
@@ -108,11 +110,17 @@ struct FourDApp : public App
 		{
 			g.viewport(0, 0, fbWidth(), fbHeight());
 
-			nautilus.drawProjectedShadow(g, viewer);
+			drawProjectedEdgesLocal(
+				g,
+				viewer,
+				nautilus,
+				nautilus.shadowVertsLocal(),
+				nautilus.shadowEdgesLocal(),
+				projectionSettings);
 
 			if (showWorldAxes)
 			{
-				drawWorldAxes(g, viewer);
+				drawWorldAxes(g, viewer, projectionSettings);
 			}
 		}
 		else
@@ -121,10 +129,16 @@ struct FourDApp : public App
 			{
 				// Left: projection shadow
 				g.viewport(0, 0, fbWidth() / 2, fbHeight());
-				nautilus.drawProjectedShadow(g, viewer);
+				drawProjectedEdgesLocal(
+					g,
+					viewer,
+					nautilus,
+					nautilus.shadowVertsLocal(),
+					nautilus.shadowEdgesLocal(),
+					projectionSettings);
 				if (showWorldAxes)
 				{
-					drawWorldAxes(g, viewer);
+					drawWorldAxes(g, viewer, projectionSettings);
 				}
 
 				// Right: 3D slice
@@ -169,6 +183,17 @@ struct FourDApp : public App
 			ImGui::SameLine();
 			ImGui::RadioButton("Slicing", &mode, static_cast<int>(RenderMode::Slicing));
 			renderMode = static_cast<RenderMode>(mode);
+		}
+
+		if (renderMode == RenderMode::Projection)
+		{
+			int mode = static_cast<int>(projectionSettings.mode);
+			ImGui::RadioButton("1-point", &mode, static_cast<int>(ProjectionMode::OnePoint));
+			ImGui::SameLine();
+			ImGui::RadioButton("2-point (x)", &mode, static_cast<int>(ProjectionMode::TwoPoint));
+			projectionSettings.mode = static_cast<ProjectionMode>(mode);
+			ImGui::SliderFloat("Vanish X distance", &projectionSettings.vanishX, 4.f, 80.f, "%.1f");
+			ImGui::Separator();
 		}
 
 		if (renderMode == RenderMode::Slicing)

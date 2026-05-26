@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Manifolds4D.hpp"
+#include "FProjection.hpp"
 
 #include "al/graphics/al_Graphics.hpp"
 #include "al/graphics/al_Mesh.hpp"
@@ -88,7 +88,7 @@ inline al::Vec3f slicePointTo3D(const Vec4f &pLocal, float sliceScale)
 }
 
 inline SliceResult sliceQuadsViewerLocal(
-    const object4D &viewer,
+    const Object4D &viewer,
     const std::vector<Vec4f> &vertsWorld,
     const std::vector<std::array<int, 4>> &quads,
     const SliceSettings &settings)
@@ -307,7 +307,7 @@ inline void emitEdgesFromTriangles(al::Mesh &edges, const al::Mesh &tris, const 
 }
 
 inline HyperSliceResult slice4SimplicesViewerLocal(
-    const object4D &viewer,
+    const Object4D &viewer,
     const std::vector<Vec4f> &vertsWorld,
     const std::vector<std::array<int, 5>> &simplices,
     const HyperSliceSettings &settings)

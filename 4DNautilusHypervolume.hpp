@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Manifolds4D.hpp"
+#include "Object4D.hpp"
 #include "al/io/al_Imgui.hpp"
 
 #include <algorithm>
@@ -26,7 +26,7 @@ using namespace al;
 // produces a 3D volume; we render its boundary as triangles from exact simplex
 // intersections (implemented in `Fslicer.hpp`).
 // ----------------------------------------------------------------------------
-class NautilusHypervolume4D : public object4D
+class NautilusHypervolume4D : public Object4D
 {
 public:
     struct BuildSettings
@@ -98,41 +98,8 @@ public:
         simplices = simplices_;
     }
 
-    // Projection shadow: draw a wireframe of the outer boundary surface we already
-    // have as quads (same as the old surface nautilus).
-    void drawProjectedShadow(al::Graphics &g, const object4D &viewer) const
-    {
-        if (shadowVertsLocal_.empty())
-        {
-            return;
-        }
-
-        al::Mesh mesh;
-        mesh.primitive(al::Mesh::LINES);
-
-        for (const auto &e : shadowEdges_)
-        {
-            const Vec4f aWorld = pos + rotationState.apply(shadowVertsLocal_[e.first]);
-            const Vec4f bWorld = pos + rotationState.apply(shadowVertsLocal_[e.second]);
-
-            const Vec4f aLocal = toViewerLocal(viewer, aWorld);
-            const Vec4f bLocal = toViewerLocal(viewer, bWorld);
-
-            const al::Vec3f pa = projectLocal4Dto3D(aLocal);
-            const al::Vec3f pb = projectLocal4Dto3D(bLocal);
-
-            const al::Color ca = colorFromLocalW(aLocal.w);
-            const al::Color cb = colorFromLocalW(bLocal.w);
-
-            mesh.color(ca);
-            mesh.vertex(pa);
-            mesh.color(cb);
-            mesh.vertex(pb);
-        }
-
-        g.meshColor();
-        g.draw(mesh);
-    }
+    const std::vector<Vec4f> &shadowVertsLocal() const { return shadowVertsLocal_; }
+    const std::vector<std::pair<int, int>> &shadowEdgesLocal() const { return shadowEdges_; }
 
     const BuildSettings &settings() const { return settings_; }
 

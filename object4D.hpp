@@ -13,16 +13,16 @@ using namespace al;
  * Rotation state is a set of 2 uniform quaternions (qL, qR) that represents the rotation in the 4D space.
  */
 
-class object4D
+class Object4D
 {
 public:
     Vec4f pos{0.f, 0.f, 0.f, 0.f};
     Rotation4D rotationState;
     FaceDirection faceDirection;
 
-    object4D() = default;
+    Object4D() = default;
 
-    virtual ~object4D() = default;
+    virtual ~Object4D() = default;
 
     void setRotation(const Rotation4D &r) { rotationState = r; }
     void applyRotation(const Rotation4D &r) { rotationState.prepend(r); }
