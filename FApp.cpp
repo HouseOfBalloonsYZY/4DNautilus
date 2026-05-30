@@ -1,18 +1,49 @@
 #include "al/app/al_App.hpp"
 #include "al/io/al_Imgui.hpp"
 #include "al/graphics/al_Shapes.hpp"
-// #include "al/io/al_Window.hpp"
+
 #include "4DNautilusHypervolume.hpp"
 #include "FProjection.hpp"
 #include "FSlicer.hpp"
+#include "Nav4D.hpp"
+#include "Nautilus4D.hpp"
 
+#include <array>
+#include <cmath>
+#include <limits>
+#include <utility>
+#include <vector>
 
 using namespace al;
 
+namespace
+{
+
+float clamp01(float x)
+{
+	return std::max(0.f, std::min(1.f, x));
+}
+
+al::Color nautilusGradientColor(float t)
+{
+	const al::Color inner(1.f, 1.f, 1.f, 1.f);
+	const al::Color outer(1.f, 100.f / 255.f, 0.f, 76.f / 255.f);
+
+	al::Color c;
+	c.r = inner.r + t * (outer.r - inner.r);
+	c.g = inner.g + t * (outer.g - inner.g);
+	c.b = inner.b + t * (outer.b - inner.b);
+	c.a = inner.a + t * (outer.a - inner.a);
+	return c;
+}
+
+} // namespace
+
 struct FourDApp : public App
 {
-	Object4D viewer;
-	NautilusHypervolume4D nautilus;
+	Nav4D camera4D;
+	Nautilus4D nautilus;
+	NautilusHypervolume4D hypervolume;
 
 	enum class RenderMode
 	{
@@ -23,125 +54,80 @@ struct FourDApp : public App
 	RenderMode renderMode{RenderMode::Projection};
 	bool splitView{true};
 	ProjectionSettings projectionSettings{};
-	HyperSliceSettings sliceSettings{};
+	Slicer4D::Settings sliceSettings{};
 
 	bool uiVisible{true};
 	bool showWorldAxes{true};
 
-	// Movement/rotation state (keyboard + UI).
-	bool moveKeyPos[4]{};
-	bool moveKeyNeg[4]{};
-	bool moveUiPos[4]{};
-	bool moveUiNeg[4]{};
-
-	bool rotKeyPos[6]{};
-	bool rotKeyNeg[6]{};
-	bool rotUiPos[6]{};
-	bool rotUiNeg[6]{};
-
-	const float moveSpeed = 1.5f;     // units per second
-	const float rotSpeedDeg = 45.f;   // degrees per second
+	// Input tuning (maps keys/UI to target rates on camera4D; integration lives on Object4D).
+	static constexpr float kMoveSpeed = 1.5f;
+	static constexpr float kRotSpeedDeg = 45.f;
 
 	void onCreate() override
 	{
-		nav().pos(0, 0, 10);
-		nav().faceToward(Vec3d(0, 0, 0));
+		camera4D.halt();
+		camera4D.home();
 
-		viewer.pos = Vec4f(0.f, 0.f, 0.f, 0.f);
-		viewer.setRotation(Rotation4D::identity());
+		nav().pos(0, 0, 0);
+		nav().faceToward(Vec3d(0, 0, -1));
 
 		imguiInit();
-
-		// Disable Allolib default nav keys; we drive viewer + nav explicitly below.
-		// navControl().disable();
+		navControl().disable();
 	}
 
 	void onAnimate(double dt) override
 	{
-		const float dMove = moveSpeed * static_cast<float>(dt);
-		const float dRotDeg = rotSpeedDeg * static_cast<float>(dt);
-
-		// Net movement per axis from keyboard + UI.
-		for (int axis = 0; axis < 4; ++axis)
-		{
-			float dir = 0.f;
-			if (moveKeyPos[axis] || moveUiPos[axis]) dir += 1.f;
-			if (moveKeyNeg[axis] || moveUiNeg[axis]) dir -= 1.f;
-			if (dir != 0.f)
-			{
-				viewer.move(axis, dir * dMove);
-				// Keep 3D nav in sync for x,y,z (Allolib camera convention).
-				if (axis < 3)
-				{
-					nav().pos()[axis] += dir * dMove;
-				}
-			}
-		}
-
-		// Rotation in 6 cardinal planes: XY, XZ, XW, YZ, YW, ZW
-		static const int planeA[6] = {0, 0, 0, 1, 1, 2};
-		static const int planeB[6] = {1, 2, 3, 2, 3, 3};
-
-		for (int i = 0; i < 6; ++i)
-		{
-			float dir = 0.f;
-			if (rotKeyPos[i] || rotUiPos[i]) dir += 1.f;
-			if (rotKeyNeg[i] || rotUiNeg[i]) dir -= 1.f;
-			if (dir != 0.f)
-			{
-				viewer.rotatePlane(planeA[i], planeB[i], dir * dRotDeg);
-			}
-		}
+		const float rotSpeedRad = kRotSpeedDeg * (3.14159265358979f / 180.f);
 
 		imguiBeginFrame();
+
+		// UI is polled each frame; add its target rates only for this step (keyboard
+		// rates persist on camera4D via add/sub in onKeyDown/onKeyUp, Nav-style).
+		Vec4f uiMoveSpeedLocal{0.f, 0.f, 0.f, 0.f};
+		std::array<float, 6> uiRotateSpeedLocal{};
+
 		if (uiVisible)
 		{
-			drawControlPanel();
+			drawControlPanel(uiMoveSpeedLocal, uiRotateSpeedLocal, rotSpeedRad);
 		}
+
+		camera4D.addMoveSpeedLocal(uiMoveSpeedLocal);
+		camera4D.addRotateSpeedLocal(uiRotateSpeedLocal);
+		camera4D.step(dt);
+		camera4D.addMoveSpeedLocal(-uiMoveSpeedLocal);
+		camera4D.addRotateSpeedLocal(negatePlaneRates(uiRotateSpeedLocal));
+
 		imguiEndFrame();
 	}
 
-	void onDraw(Graphics& g) override
+	void onDraw(Graphics &g) override
 	{
 		g.clear(0.1);
 		g.depthTesting(true);
 
+		Projection4D projection(projectionSettings);
+
 		if (renderMode == RenderMode::Projection)
 		{
 			g.viewport(0, 0, fbWidth(), fbHeight());
-
-			drawProjectedEdgesLocal(
-				g,
-				viewer,
-				nautilus,
-				nautilus.shadowVertsLocal(),
-				nautilus.shadowEdgesLocal(),
-				projectionSettings);
+			drawNautilusProjection(g, projection);
 
 			if (showWorldAxes)
 			{
-				drawWorldAxes(g, viewer, projectionSettings);
+				projection.drawWorldAxes(g, camera4D);
 			}
 		}
 		else
 		{
 			if (splitView)
 			{
-				// Left: projection shadow
 				g.viewport(0, 0, fbWidth() / 2, fbHeight());
-				drawProjectedEdgesLocal(
-					g,
-					viewer,
-					nautilus,
-					nautilus.shadowVertsLocal(),
-					nautilus.shadowEdgesLocal(),
-					projectionSettings);
+				drawNautilusProjection(g, projection);
 				if (showWorldAxes)
 				{
-					drawWorldAxes(g, viewer, projectionSettings);
+					projection.drawWorldAxes(g, camera4D);
 				}
 
-				// Right: 3D slice
 				g.viewport(fbWidth() / 2, 0, fbWidth() / 2, fbHeight());
 			}
 			else
@@ -151,22 +137,35 @@ struct FourDApp : public App
 
 			std::vector<Vec4f> vertsWorld;
 			std::vector<std::array<int, 5>> simplices;
-			nautilus.buildWorldSimplices(vertsWorld, simplices);
+			hypervolume.buildWorldSimplices(vertsWorld, simplices);
 
-			const auto slice = slice4SimplicesViewerLocal(viewer, vertsWorld, simplices, sliceSettings);
+			const HyperSliceResult slice = slice4SimplicesViewerLocal(
+				camera4D,
+				vertsWorld,
+				simplices,
+				sliceSettings);
 			drawHyperSlice(g, slice, sliceSettings);
 		}
 
-		// Restore default viewport for UI
 		g.viewport(0, 0, fbWidth(), fbHeight());
-
 		imguiDraw();
 	}
 
-	void drawControlPanel()
+	static std::array<float, 6> negatePlaneRates(const std::array<float, 6> &rates)
 	{
-		if (!uiVisible) return;
+		std::array<float, 6> out = rates;
+		for (float &r : out)
+		{
+			r = -r;
+		}
+		return out;
+	}
 
+	void drawControlPanel(
+		Vec4f &uiMoveSpeedLocal,
+		std::array<float, 6> &uiRotateSpeedLocal,
+		float rotSpeedRad)
+	{
 		ImGui::SetNextWindowBgAlpha(0.9f);
 		ImGui::Begin("4D Controls");
 
@@ -174,8 +173,8 @@ struct FourDApp : public App
 		ImGui::Separator();
 
 		ImGui::Checkbox("Show world axes", &showWorldAxes);
-		ImGui::Separator();
 
+		ImGui::Separator();
 		ImGui::Text("Render mode");
 		{
 			int mode = static_cast<int>(renderMode);
@@ -185,8 +184,10 @@ struct FourDApp : public App
 			renderMode = static_cast<RenderMode>(mode);
 		}
 
-		if (renderMode == RenderMode::Projection)
+		if (renderMode == RenderMode::Projection
+			|| (renderMode == RenderMode::Slicing && splitView))
 		{
+			ImGui::Text("Projection (orange/white tube)");
 			int mode = static_cast<int>(projectionSettings.mode);
 			ImGui::RadioButton("1-point", &mode, static_cast<int>(ProjectionMode::OnePoint));
 			ImGui::SameLine();
@@ -199,54 +200,51 @@ struct FourDApp : public App
 		if (renderMode == RenderMode::Slicing)
 		{
 			ImGui::Checkbox("Split view", &splitView);
-			ImGui::SliderFloat("Slice w (viewer-local)", &sliceSettings.wPlane, -25.0f, 25.0f, "%.2f");
-			ImGui::SliderFloat("Slice scale", &sliceSettings.sliceScale, 1.0f, 60.0f, "%.1f");
-			ImGui::Checkbox("Slice edges", &sliceSettings.drawEdges);
+			ImGui::SliderFloat("Slice w (viewer-local)", &sliceSettings.wPlane, -25.f, 25.f, "%.2f");
+			ImGui::SliderFloat("Slice scale", &sliceSettings.sliceScale, 1.f, 60.f, "%.1f");
+			ImGui::Checkbox("Slice solid", &sliceSettings.drawVolume);
 			ImGui::Checkbox("Slice points", &sliceSettings.drawPoints);
-			ImGui::SliderFloat("Slice point size", &sliceSettings.pointSize, 1.0f, 10.0f, "%.1f");
+			ImGui::SliderFloat("Slice point size", &sliceSettings.pointSize, 1.f, 10.f, "%.1f");
 			ImGui::Separator();
 		}
 
-		ImGui::Text("Move (click/hold or keys, Allolib XYZ)");
+		ImGui::Text("Move (click/hold or keys, viewer-local face axes)");
 		ImGui::Text("  D/A = +/-X   E/C = +/-Y   W/X = forward/back (-Z/+Z)");
-		ImGui::Text("  R/V = kata/ana (+W/-W, toward/away in 4D)");
+		ImGui::Text("  R/V = kata/ana (+W/-W)");
 
-		// Movement buttons: rows per axis.
-		drawAxisButtons("X", 0);
-		drawAxisButtons("Y", 1);
-		drawAxisButtons("Z", 2);
-		drawAxisButtons("W (4D)", 3);
+		drawMoveAxisButtons("X", 0, uiMoveSpeedLocal);
+		drawMoveAxisButtons("Y", 1, uiMoveSpeedLocal);
+		drawMoveAxisButtons("Z", 2, uiMoveSpeedLocal);
+		drawMoveAxisButtons("W (4D)", 3, uiMoveSpeedLocal);
 
 		ImGui::Separator();
 		ImGui::Text("Rotate planes (click/hold or keys)");
 		ImGui::Text("  Q/Z = XY   arrows L/R = XZ   arrows U/D = YZ");
 		ImGui::Text("  1/2 = XW   3/4 = YW   5/6 = ZW");
 
-		const char* planeLabels[6] = {"XY", "XZ", "XW", "YZ", "YW", "ZW"};
+		static const char *planeLabels[6] = {"XY", "XZ", "XW", "YZ", "YW", "ZW"};
 		for (int i = 0; i < 6; ++i)
 		{
-			ImGui::PushID(i);
-			ImGui::Text("%s", planeLabels[i]);
-			ImGui::SameLine();
-			if (ImGui::Button("-"))
-			{
-				// Press event not used; continuous handled via IsItemActive().
-			}
-			rotUiNeg[i] = ImGui::IsItemActive();
-			ImGui::SameLine();
-			if (ImGui::Button("+"))
-			{
-			}
-			rotUiPos[i] = ImGui::IsItemActive();
-			ImGui::PopID();
+			drawRotatePlaneButtons(planeLabels[i], i, uiRotateSpeedLocal, rotSpeedRad);
 		}
 
-		nautilus.drawImGuiControls();
+		if (renderMode == RenderMode::Projection
+			|| (renderMode == RenderMode::Slicing && splitView))
+		{
+			nautilus.drawImGuiControls();
+		}
+
+		if (renderMode == RenderMode::Slicing)
+		{
+			ImGui::Separator();
+			ImGui::Text("Hypervolume (slicing)");
+			hypervolume.drawImGuiControls();
+		}
 
 		ImGui::End();
 	}
 
-	void drawAxisButtons(const char* label, int axis)
+	void drawMoveAxisButtons(const char *label, int axis, Vec4f &moveSpeedLocal)
 	{
 		ImGui::PushID(axis);
 		ImGui::Text("%s", label);
@@ -254,210 +252,374 @@ struct FourDApp : public App
 		if (ImGui::Button("-"))
 		{
 		}
-		moveUiNeg[axis] = ImGui::IsItemActive();
+		if (ImGui::IsItemActive())
+		{
+			moveSpeedLocal[static_cast<size_t>(axis)] -= kMoveSpeed;
+		}
 		ImGui::SameLine();
 		if (ImGui::Button("+"))
 		{
 		}
-		moveUiPos[axis] = ImGui::IsItemActive();
+		if (ImGui::IsItemActive())
+		{
+			moveSpeedLocal[static_cast<size_t>(axis)] += kMoveSpeed;
+		}
 		ImGui::PopID();
 	}
 
-	bool onKeyDown(const Keyboard& k) override
+	void drawRotatePlaneButtons(
+		const char *label,
+		int plane,
+		std::array<float, 6> &rotateSpeedLocal,
+		float rotSpeedRad)
+	{
+		ImGui::PushID(plane);
+		ImGui::Text("%s", label);
+		ImGui::SameLine();
+		if (ImGui::Button("-"))
+		{
+		}
+		if (ImGui::IsItemActive())
+		{
+			rotateSpeedLocal[static_cast<size_t>(plane)] -= rotSpeedRad;
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("+"))
+		{
+		}
+		if (ImGui::IsItemActive())
+		{
+			rotateSpeedLocal[static_cast<size_t>(plane)] += rotSpeedRad;
+		}
+		ImGui::PopID();
+	}
+
+	void drawNautilusProjection(Graphics &g, const Projection4D &projection)
+	{
+		const std::vector<Vec4f> &verticesLocal = nautilus.verticesLocal();
+		const std::vector<float> &hyperDists = nautilus.hyperDistsLocal();
+		const int tSteps = nautilus.tSteps();
+		const int vSteps = nautilus.vSteps();
+		const int startRing = nautilus.projectionStartRing();
+		const int ringCount = nautilus.projectionRingCount();
+
+		if (verticesLocal.empty() || tSteps <= 0 || vSteps <= 0)
+		{
+			return;
+		}
+
+		const int ringCountClamped = std::max(1, std::min(ringCount, tSteps));
+		const int startRingClamped = std::max(0, std::min(startRing, tSteps - 1));
+		const int ringsForProj = ringCountClamped + 1;
+		const size_t windowVerts = static_cast<size_t>(ringsForProj) * static_cast<size_t>(vSteps);
+
+		std::vector<Vec3f> proj(windowVerts);
+		std::vector<float> dists(windowVerts);
+
+		float minD = std::numeric_limits<float>::max();
+		float maxD = std::numeric_limits<float>::lowest();
+
+		for (int k = 0; k <= ringCountClamped; ++k)
+		{
+			const int r = (startRingClamped + k) % tSteps;
+
+			for (int v = 0; v < vSteps; ++v)
+			{
+				const int localIdx = r * vSteps + v;
+				const size_t winIdx = static_cast<size_t>(k * vSteps + v);
+
+				const Vec4f vWorld = Projection4D::objectToWorld(
+					nautilus,
+					verticesLocal[static_cast<size_t>(localIdx)]);
+
+				proj[winIdx] = projection.projectWorld(camera4D, vWorld);
+				dists[winIdx] = hyperDists[static_cast<size_t>(localIdx)];
+
+				minD = std::min(minD, dists[winIdx]);
+				maxD = std::max(maxD, dists[winIdx]);
+			}
+		}
+
+		if (maxD <= minD)
+		{
+			maxD = minD + 1.f;
+		}
+
+		g.blending(true);
+		g.blendTrans();
+
+		Mesh lines;
+		lines.primitive(Mesh::LINES);
+
+		for (int k = 0; k < ringCountClamped; ++k)
+		{
+			for (int v = 0; v < vSteps; ++v)
+			{
+				const size_t curr = static_cast<size_t>(k * vSteps + v);
+				const size_t nextV = static_cast<size_t>(k * vSteps + ((v + 1) % vSteps));
+				const size_t nextT = static_cast<size_t>((k + 1) * vSteps + v);
+
+				const float t = clamp01((dists[curr] - minD) / (maxD - minD));
+				const al::Color c = nautilusGradientColor(t);
+
+				lines.color(c);
+				lines.vertex(proj[curr]);
+				lines.color(c);
+				lines.vertex(proj[nextV]);
+
+				const int actualRingIndex = (startRingClamped + k) % tSteps;
+				const bool isPhysicalWrap = (actualRingIndex == tSteps - 1);
+				if (!isPhysicalWrap)
+				{
+					lines.color(c);
+					lines.vertex(proj[curr]);
+					lines.color(c);
+					lines.vertex(proj[nextT]);
+				}
+			}
+		}
+
+		Mesh points;
+		if (nautilus.drawVertexDots() && nautilus.pointStride() > 0)
+		{
+			points.primitive(Mesh::POINTS);
+			g.pointSize(nautilus.pointSize());
+
+			const int pointStride = std::max(1, nautilus.pointStride());
+			for (int k = 0; k < ringCountClamped; k += pointStride)
+			{
+				for (int v = 0; v < vSteps; v += pointStride)
+				{
+					const size_t idx = static_cast<size_t>(k * vSteps + v);
+					if (idx >= windowVerts)
+					{
+						continue;
+					}
+
+					const float t = clamp01((dists[idx] - minD) / (maxD - minD));
+					points.color(nautilusGradientColor(t));
+					points.vertex(proj[idx]);
+				}
+			}
+		}
+
+		projection.drawLineMesh(g, lines);
+
+		if (nautilus.drawVertexDots() && !points.vertices().empty())
+		{
+			projection.drawLineMesh(g, points);
+		}
+
+		g.blending(false);
+	}
+
+	void resetNavigationInput()
+	{
+		camera4D.halt();
+		camera4D.home();
+		nav().pos(0, 0, 0);
+		nav().faceToward(Vec3d(0, 0, -1));
+	}
+
+	bool onKeyDown(const Keyboard &k) override
 	{
 		const int key = k.key();
+		const float rotSpeedRad = kRotSpeedDeg * (3.14159265358979f / 180.f);
 
-		// Toggle UI visibility.
 		if (key == 'h' || key == 'H')
 		{
 			uiVisible = !uiVisible;
 			return true;
 		}
 
-		// Translation (Allolib XYZ + R/V for 4D w)
+		if (key == ' ')
+		{
+			resetNavigationInput();
+			return true;
+		}
+
 		switch (key)
 		{
+        //X
 		case 'd':
 		case 'D':
-			moveKeyPos[0] = true;
+			camera4D.addMoveSpeedLocal(0, kMoveSpeed);
 			return true;
 		case 'a':
 		case 'A':
-			moveKeyNeg[0] = true;
+			camera4D.addMoveSpeedLocal(0, -kMoveSpeed);
 			return true;
+        // Y
 		case 'e':
 		case 'E':
-			moveKeyPos[1] = true;
+			camera4D.addMoveSpeedLocal(1, kMoveSpeed);
 			return true;
 		case 'c':
 		case 'C':
-			moveKeyNeg[1] = true;
+			camera4D.addMoveSpeedLocal(1, -kMoveSpeed);
 			return true;
+        // Z
 		case 'w':
 		case 'W':
-			moveKeyNeg[2] = true; // forward = -z (Allolib)
+			camera4D.addMoveSpeedLocal(2, kMoveSpeed);
 			return true;
 		case 'x':
 		case 'X':
-			moveKeyPos[2] = true; // back = +z
+			camera4D.addMoveSpeedLocal(2, -kMoveSpeed);
 			return true;
+        // W
 		case 'r':
 		case 'R':
-			moveKeyPos[3] = true; // +w = kata (toward viewer)
+			camera4D.addMoveSpeedLocal(3, kMoveSpeed);
 			return true;
 		case 'v':
 		case 'V':
-			moveKeyNeg[3] = true; // -w = ana (away from viewer)
+			camera4D.addMoveSpeedLocal(3, -kMoveSpeed);
 			return true;
 
-		// Rotation (Allolib spatial planes + 1-6 for w planes)
+        // XY 
+        case 'z':
+		case 'Z':
+			camera4D.addRotateSpeedLocal(0, rotSpeedRad);
+			return true;   
 		case 'q':
 		case 'Q':
-			rotKeyPos[0] = true; // XY (bank)
+			camera4D.addRotateSpeedLocal(0, -rotSpeedRad);
 			return true;
-		case 'z':
-		case 'Z':
-			rotKeyNeg[0] = true;
-			return true;
+        // XZ
+        case Keyboard::RIGHT:
+			camera4D.addRotateSpeedLocal(1, rotSpeedRad);
+            return true;
 		case Keyboard::LEFT:
-			rotKeyPos[1] = true; // XZ (azimuth)
+			camera4D.addRotateSpeedLocal(1, -rotSpeedRad);
 			return true;
-		case Keyboard::RIGHT:
-			rotKeyNeg[1] = true;
-			return true;
-		case Keyboard::UP:
-			rotKeyPos[3] = true; // YZ (elevation)
-			return true;
-		case Keyboard::DOWN:
-			rotKeyNeg[3] = true;
-			return true;
+        // ZW
 		case '1':
-			rotKeyPos[2] = true; // XW
+			camera4D.addRotateSpeedLocal(2, rotSpeedRad);
 			return true;
 		case '2':
-			rotKeyNeg[2] = true;
+			camera4D.addRotateSpeedLocal(2, -rotSpeedRad);
 			return true;
+        // YZ
+		case Keyboard::UP:
+			camera4D.addRotateSpeedLocal(3, rotSpeedRad);
+			return true;
+		case Keyboard::DOWN:
+			camera4D.addRotateSpeedLocal(3, -rotSpeedRad);
+			return true;
+        // YW
 		case '3':
-			rotKeyPos[4] = true; // YW
+			camera4D.addRotateSpeedLocal(4, rotSpeedRad);
 			return true;
 		case '4':
-			rotKeyNeg[4] = true;
+			camera4D.addRotateSpeedLocal(4, -rotSpeedRad);
 			return true;
+        // ZW
 		case '5':
-			rotKeyPos[5] = true; // ZW
+			camera4D.addRotateSpeedLocal(5, rotSpeedRad);
 			return true;
 		case '6':
-			rotKeyNeg[5] = true;
+			camera4D.addRotateSpeedLocal(5, -rotSpeedRad);
 			return true;
 		default:
 			break;
-		}
-
-		// Reset viewer + 3D nav
-		if (key == ' ')
-		{
-			viewer.pos = Vec4f(0.f, 0.f, 0.f, 0.f);
-			viewer.setRotation(Rotation4D::identity());
-			nav().halt();
-			nav().pos(0, 0, 10);
-			nav().faceToward(Vec3d(0, 0, 0));
-
-			for (int i = 0; i < 4; ++i)
-			{
-				moveKeyPos[i] = moveKeyNeg[i] = false;
-				moveUiPos[i] = moveUiNeg[i] = false;
-			}
-			for (int i = 0; i < 6; ++i)
-			{
-				rotKeyPos[i] = rotKeyNeg[i] = false;
-				rotUiPos[i] = rotUiNeg[i] = false;
-			}
-
-			return true;
 		}
 
 		return false;
 	}
 
-	bool onKeyUp(const Keyboard& k) override
+	bool onKeyUp(const Keyboard &k) override
 	{
 		const int key = k.key();
+		const float rotSpeedRad = kRotSpeedDeg * (3.14159265358979f / 180.f);
+
 		switch (key)
 		{
+		//X
 		case 'd':
 		case 'D':
-			moveKeyPos[0] = false;
+			camera4D.addMoveSpeedLocal(0, -kMoveSpeed);
 			return true;
 		case 'a':
 		case 'A':
-			moveKeyNeg[0] = false;
+			camera4D.addMoveSpeedLocal(0, kMoveSpeed);
 			return true;
+        // Y
 		case 'e':
 		case 'E':
-			moveKeyPos[1] = false;
+			camera4D.addMoveSpeedLocal(1, -kMoveSpeed);
 			return true;
 		case 'c':
 		case 'C':
-			moveKeyNeg[1] = false;
+			camera4D.addMoveSpeedLocal(1, kMoveSpeed);
 			return true;
+        // Z
 		case 'w':
 		case 'W':
-			moveKeyNeg[2] = false;
+			camera4D.addMoveSpeedLocal(2, -kMoveSpeed);
 			return true;
 		case 'x':
 		case 'X':
-			moveKeyPos[2] = false;
+			camera4D.addMoveSpeedLocal(2, kMoveSpeed);
 			return true;
+        // W
 		case 'r':
 		case 'R':
-			moveKeyPos[3] = false;
+			camera4D.addMoveSpeedLocal(3, -kMoveSpeed);
 			return true;
 		case 'v':
 		case 'V':
-			moveKeyNeg[3] = false;
+			camera4D.addMoveSpeedLocal(3, kMoveSpeed);
 			return true;
 
+        // XY 
+        case 'z':
+		case 'Z':
+			camera4D.addRotateSpeedLocal(0, -rotSpeedRad);
+			return true;   
 		case 'q':
 		case 'Q':
-			rotKeyPos[0] = false;
+			camera4D.addRotateSpeedLocal(0, rotSpeedRad);
 			return true;
-		case 'z':
-		case 'Z':
-			rotKeyNeg[0] = false;
-			return true;
+        // XZ
+        case Keyboard::RIGHT:
+			camera4D.addRotateSpeedLocal(1, -rotSpeedRad);
+            return true;
 		case Keyboard::LEFT:
-			rotKeyPos[1] = false;
+			camera4D.addRotateSpeedLocal(1, rotSpeedRad);
 			return true;
-		case Keyboard::RIGHT:
-			rotKeyNeg[1] = false;
-			return true;
-		case Keyboard::UP:
-			rotKeyPos[3] = false;
-			return true;
-		case Keyboard::DOWN:
-			rotKeyNeg[3] = false;
-			return true;
+        // ZW
 		case '1':
-			rotKeyPos[2] = false;
+			camera4D.addRotateSpeedLocal(2, -rotSpeedRad);
 			return true;
 		case '2':
-			rotKeyNeg[2] = false;
+			camera4D.addRotateSpeedLocal(2, rotSpeedRad);
 			return true;
+        // YZ
+		case Keyboard::UP:
+			camera4D.addRotateSpeedLocal(3, -rotSpeedRad);
+			return true;
+		case Keyboard::DOWN:
+			camera4D.addRotateSpeedLocal(3, rotSpeedRad);
+			return true;
+        // YW
 		case '3':
-			rotKeyPos[4] = false;
+			camera4D.addRotateSpeedLocal(4, -rotSpeedRad);
 			return true;
 		case '4':
-			rotKeyNeg[4] = false;
+			camera4D.addRotateSpeedLocal(4, rotSpeedRad);
 			return true;
+        // ZW
 		case '5':
-			rotKeyPos[5] = false;
+			camera4D.addRotateSpeedLocal(5, -rotSpeedRad);
 			return true;
 		case '6':
-			rotKeyNeg[5] = false;
+			camera4D.addRotateSpeedLocal(5, rotSpeedRad);
 			return true;
 		default:
 			break;
 		}
+
 		return false;
 	}
 
@@ -474,7 +636,3 @@ int main()
 	app.start();
 	return 0;
 }
-
-
-
-

@@ -3,46 +3,66 @@
 #include "al/math/al_Quat.hpp"
 #include "al/math/al_Vec.hpp"
 #include <cmath>
+#include <array>
 
 using namespace al;
 
-// ---------------------------------------------------------------------------
-// 4D vectors (x, y, z, w). Float for performance with many calculations.
-//
-// Axis convention (matches allolib/OpenGL for x,y,z; w is the fourth axis):
-//   x = right
-//   y = up
-//   z = backward (into the screen)
-//   w = toward the viewer / into the parallel 3D world "in front" of the viewer
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Vec4 <-> Quat (for 4D rotation formula)
-// Convention: Vec4f(x,y,z,w) <-> Quatf(w,x,y,z) so R^4 = quaternions.
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------------
+// helpers
+// ------------------------------------------------------------
 
 inline Quatf vec4ToQuat(const Vec4f &v) { return Quatf(v.w, v.x, v.y, v.z); }
 
 inline Vec4f quatToVec4(const Quatf &q) { return Vec4f(q.x, q.y, q.z, q.w); }
 
-// ---------------------------------------------------------------------------
-// Rotation4D: 4D rotation stored as a pair of unit quaternions (qL, qR).
-// Action on v:  v' = qL * v * qR  (Rotation.md / RotateVector convention).
-//
-// qL is the left SU(2) factor. qR is the right SU(2) factor, stored directly
-// from wedge/rates as exp(vR) with no extra conjugation. apply() right-multiplies
-// by the stored qR exactly as written — same as Rotation.md ApplyRotation +
-// RotateVector.
-//
-// Isoclinic vs double rotation (see Wikipedia: Rotations in 4-dimensional
-// Euclidean space): A left-isoclinic rotation uses only qL (qR = identity);
-// a right-isoclinic uses only qR (qL = identity). Every 4D rotation in SO(4)
-// is uniquely (up to sign) the composition of one left- and one
-// right-isoclinic, so arbitrary (qL, qR) is correct and covers all 4D
-// rotations, including double rotations (two different angles in two invariant
-// planes). Use fromLeftQuat/fromRightQuat when you want a single isoclinic
-// rotation.
-// ---------------------------------------------------------------------------
+inline float degreesToRad(float angleDeg)
+{
+    float a = std::fmod(angleDeg, 360.f);
+    if (a > 180.f)
+    {
+        a -= 360.f;
+    }
+    return a * (3.14159265358979f / 180.f);
+}
+
+inline float clamp(float v, float maxAbs)
+{
+    return std::max(-maxAbs, std::min(maxAbs, v));
+}
+
+inline Vec4f clampVec4(const Vec4f &v, float maxAbs)
+{
+    Vec4f result = v;
+    result.x = clamp(result.x, maxAbs);
+    result.y = clamp(result.y, maxAbs);
+    result.z = clamp(result.z, maxAbs);
+    result.w = clamp(result.w, maxAbs);
+    return result;
+}
+
+inline std::array<float, 6> clampArray6(const std::array<float, 6> &rates, float maxAbs)
+{
+    std::array<float, 6> result = rates;
+    for (int i = 0; i < 6; ++i)
+    {
+        result[i] = clamp(result[i], maxAbs);
+    }
+    return result;
+}
+
+inline std::array<float, 6> addArray6(const std::array<float, 6> &array1, const std::array<float, 6> &array2)
+{
+    std::array<float, 6> result = array1;
+    for (int i = 0; i < 6; ++i)
+    {
+        result[i] += array2[i];
+    }
+    return result;
+}
+
+// ------------------------------------------------------------
+
+struct FaceDirection;
 
 struct Rotation4D
 {
@@ -62,6 +82,47 @@ private:
     {
         qR = q;
         qR.normalize();
+    }
+
+    /** Continue building rotation from the 6 cardinal plane rates (wedge decomposition).
+     *  vL = (R_yz+R_xw, R_zx+R_yw, R_xy+R_zw), vR = (-R_yz+R_xw, -R_zx+R_yw,
+     * -R_xy+R_zw); then qL = exp(vL), qR = exp(vR). Same as Rotation.md
+     * ApplyRotation. */
+    // Plane-rate order convention (project-wide):
+    // (rXY, rXZ, rXW, rYZ, rYW, rZW)
+    static Rotation4D fromRates(float rXY, float rXZ, float rXW, float rYZ, float rYW, float rZW)
+    {
+        // Internal construction expects bivector components in the order used by the Spin(4)
+        // (qL,qR) exponential map. This matches the prior implementation if we substitute:
+        // rZX(old) = -rXZ(new)
+        const float rZX = -rXZ;
+        Quatf leftQuat = quatFromImaginary(rYZ + rXW, rZX + rYW, rXY + rZW);
+        Quatf rightQuat = quatFromImaginary(-rYZ + rXW, -rZX + rYW, -rXY + rZW);
+        return Rotation4D(leftQuat, rightQuat);
+    }
+
+    /** Continue building a unit quaternion from a 3D "axis-angle" vector via exponential map:
+     *  q = cos(|v|) + sin(|v|) * v/|v|. Returns identity if |v| is negligible.
+     *  - axis = (vx,vy,vz) is the generator vector (abstract i,j,k components).
+     *  - theta = |axis| is the rotation half-angle; axis/theta is the unit axis.
+     *  - eps: if |axis| is nearly zero we skip division and return identity. */
+    static Quatf quatFromImaginary(float vx, float vy, float vz)
+    {
+        const float eps = 1e-7f; // super small non-zero threshold for negligible axis
+        Vec3f axis(vx, vy, vz);
+
+        // if this is tiny, return identity
+        float theta = axis.mag();
+        if (theta < eps)
+        {
+            return Quatf::identity();
+        }
+
+        // otherwise, return the quaternion
+        Quatf q;
+        q.fromAxisAngle(theta, axis / theta);
+        q.normalize();
+        return q;
     }
 
 public:
@@ -98,11 +159,14 @@ public:
         return r;
     }
 
-    void normalize()
+    Rotation4D& normalize()
     {
         qL.normalize();
         qR.normalize();
+        return *this;
     }
+
+    // constructors
 
     /** Simple rotation in one of the 6 coordinate planes: exactly one plane
      *  rotates, the orthogonal 2-plane stays fixed. axis1, axis2 in {0,1,2,3}
@@ -111,7 +175,7 @@ public:
      *  Rule A — spatial planes (xy, xz, yz): qR = qL so the w-axis stays fixed.
      *  Rule B — planes involving w (xw, yw, zw): qR = conj(qL) so the two spatial
      *  axes not in the plane stay fixed. */
-    static Rotation4D fromPlaneAngle(int axis1, int axis2, float angleRad)
+    static Rotation4D fromGlobalPlane(int axis1, int axis2, float angleRad)
     {
         if (axis1 > axis2)
         {
@@ -212,22 +276,25 @@ public:
 
     /** Rotation in the plane spanned by two 4D vectors u, v by angle (radians).
      *  Wedge product gives the 6 rates, then fromRates. u,v need not be unit. */
+    // Plane-rate order convention (project-wide):
+    // (rXY, rXZ, rXW, rYZ, rYW, rZW)
     static Rotation4D fromPlane(const Vec4f &u, const Vec4f &v, float angleRad)
     {
         Vec4f u_normalized = u.normalized();
         Vec4f v_normalized = v.normalized();
         float rXY = (u_normalized.x * v_normalized.y - u_normalized.y * v_normalized.x) * angleRad;
-        float rYZ = (u_normalized.y * v_normalized.z - u_normalized.z * v_normalized.y) * angleRad;
-        float rZX = (u_normalized.z * v_normalized.x - u_normalized.x * v_normalized.z) * angleRad;
+        // Note: rXZ = -rZX (antisymmetry of the wedge / bivector components).
+        float rXZ = (u_normalized.x * v_normalized.z - u_normalized.z * v_normalized.x) * angleRad;
         float rXW = (u_normalized.x * v_normalized.w - u_normalized.w * v_normalized.x) * angleRad;
+        float rYZ = (u_normalized.y * v_normalized.z - u_normalized.z * v_normalized.y) * angleRad;
         float rYW = (u_normalized.y * v_normalized.w - u_normalized.w * v_normalized.y) * angleRad;
         float rZW = (u_normalized.z * v_normalized.w - u_normalized.w * v_normalized.z) * angleRad;
-        return fromRates(rXY, rYZ, rZX, rXW, rYW, rZW);
+        return fromRates(rXY, rXZ, rXW, rYZ, rYW, rZW);
     }
 
     /** Double rotation: two orthogonal planes with angles. Rates add linearly. */
-    static Rotation4D fromTwoPlanes(const Vec4f &u1, const Vec4f &v1, float angle1Rad,
-                                    const Vec4f &u2, const Vec4f &v2, float angle2Rad)
+    static Rotation4D fromPlanes(const Vec4f &u1, const Vec4f &v1, float angle1Rad,
+                                 const Vec4f &u2, const Vec4f &v2, float angle2Rad)
     {
         Vec4f u1_normalized = u1.normalized();
         Vec4f v1_normalized = v1.normalized();
@@ -235,58 +302,28 @@ public:
         Vec4f v2_normalized = v2.normalized();
         float rXY = (u1_normalized.x * v1_normalized.y - u1_normalized.y * v1_normalized.x) * angle1Rad +
                     (u2_normalized.x * v2_normalized.y - u2_normalized.y * v2_normalized.x) * angle2Rad;
-        float rYZ = (u1_normalized.y * v1_normalized.z - u1_normalized.z * v1_normalized.y) * angle1Rad +
-                    (u2_normalized.y * v2_normalized.z - u2_normalized.z * v2_normalized.y) * angle2Rad;
-        float rZX = (u1_normalized.z * v1_normalized.x - u1_normalized.x * v1_normalized.z) * angle1Rad +
-                    (u2_normalized.z * v2_normalized.x - u2_normalized.x * v2_normalized.z) * angle2Rad;
+        float rXZ = (u1_normalized.x * v1_normalized.z - u1_normalized.z * v1_normalized.x) * angle1Rad +
+                    (u2_normalized.x * v2_normalized.z - u2_normalized.z * v2_normalized.x) * angle2Rad;
         float rXW = (u1_normalized.x * v1_normalized.w - u1_normalized.w * v1_normalized.x) * angle1Rad +
                     (u2_normalized.x * v2_normalized.w - u2_normalized.w * v2_normalized.x) * angle2Rad;
+        float rYZ = (u1_normalized.y * v1_normalized.z - u1_normalized.z * v1_normalized.y) * angle1Rad +
+                    (u2_normalized.y * v2_normalized.z - u2_normalized.z * v2_normalized.y) * angle2Rad;
         float rYW = (u1_normalized.y * v1_normalized.w - u1_normalized.w * v1_normalized.y) * angle1Rad +
                     (u2_normalized.y * v2_normalized.w - u2_normalized.w * v2_normalized.y) * angle2Rad;
         float rZW = (u1_normalized.z * v1_normalized.w - u1_normalized.w * v1_normalized.z) * angle1Rad +
                     (u2_normalized.z * v2_normalized.w - u2_normalized.w * v2_normalized.z) * angle2Rad;
-        return fromRates(rXY, rYZ, rZX, rXW, rYW, rZW);
+        return fromRates(rXY, rXZ, rXW, rYZ, rYW, rZW);
     }
- 
-     /** Continue building rotation from the 6 cardinal plane rates (wedge decomposition).
-      *  vL = (R_yz+R_xw, R_zx+R_yw, R_xy+R_zw), vR = (-R_yz+R_xw, -R_zx+R_yw,
-      * -R_xy+R_zw); then qL = exp(vL), qR = exp(vR). Same as Rotation.md
-      * ApplyRotation. */
-     static Rotation4D fromRates(float rXY, float rYZ, float rZX, float rXW, float rYW, float rZW)
-     {
-         Quatf leftQuat = quatFromImaginary(rYZ + rXW, rZX + rYW, rXY + rZW);
-         Quatf rightQuat = quatFromImaginary(-rYZ + rXW, -rZX + rYW, -rXY + rZW);
-         return Rotation4D(leftQuat, rightQuat);
-     }
 
-     /** Continue building a unit quaternion from a 3D "axis-angle" vector via exponential map:
-     *  q = cos(|v|) + sin(|v|) * v/|v|. Returns identity if |v| is negligible.
-     *  - axis = (vx,vy,vz) is the generator vector (abstract i,j,k components).
-     *  - theta = |axis| is the rotation half-angle; axis/theta is the unit axis.
-     *  - eps: if |axis| is nearly zero we skip division and return identity. */
-     static Quatf quatFromImaginary(float vx, float vy, float vz)
-     {
-         const float eps = 1e-7f; // super small non-zero threshold for negligible axis
-         Vec3f axis(vx, vy, vz);
- 
-         // if this is tiny, return identity
-         float theta = axis.mag();
-         if (theta < eps)
-         {
-             return Quatf::identity();
-         }
- 
-         // otherwise, return the quaternion
-         Quatf q;
-         q.fromAxisAngle(theta, axis / theta);
-         q.normalize();
-         return q;
-     }
+    // this has to be implemented outside becasue FaceDirection hasn't been defined yet at this point in the file
+    static Rotation4D fromLocalPlane(const FaceDirection &face, int axis1, int axis2, float angleRad);
 
-    void prepend(const Rotation4D &newRot)
+    /// Accumulate this frame's rotation after the current state (Plan A / face-plane deltas).
+    /// R_total = delta ∘ R_old  →  qL = qL_delta·qL_old,  qR = qR_old·qR_delta
+    void append(const Rotation4D &delta)
     {
-        qL = newRot.qL.multiply(qL);
-        qR = qR.multiply(newRot.qR);
+        qL = delta.qL.multiply(qL);
+        qR = qR.multiply(delta.qR);
 
         qL.normalize();
         qR.normalize();
@@ -310,29 +347,64 @@ public:
     }
 };
 
-// default face direction is FaceRight(1, 0, 0, 0), FaceUp(0, 1, 0, 0), FaceForward(0, 0, -1, 0), FaceAna(0, 0, 0, -1).
 struct FaceDirection
 {
-    Vec4f faceRight{1.f, 0.f, 0.f, 0.f};
-    Vec4f faceUp{0.f, 1.f, 0.f, 0.f};
-    Vec4f faceForward{0.f, 0.f, -1.f, 0.f};
-    Vec4f faceAna{0.f, 0.f, 0.f, -1.f};
+    std::array<Vec4f, 4> face =
+        {
+            Vec4f(1.f, 0.f, 0.f, 0.f),
+            Vec4f(0.f, 1.f, 0.f, 0.f),
+            Vec4f(0.f, 0.f, -1.f, 0.f),
+            Vec4f(0.f, 0.f, 0.f, -1.f)};
 
     FaceDirection() = default;
 
-    // only call when needed, don't call every frame
-    void updateFaceDirection(const Rotation4D &rotation)
+    void updateFaceDirection(Rotation4D &rotation)
     {
-        faceForward = rotation.apply(faceForward).normalized();
-        faceRight = rotation.apply(faceRight).normalized();
-        faceUp = rotation.apply(faceUp).normalized();
-        faceAna = rotation.apply(faceAna).normalized();
+        face[0] = rotation.apply(Vec4f(1.f, 0.f, 0.f, 0.f)).normalized();
+        face[1] = rotation.apply(Vec4f(0.f, 1.f, 0.f, 0.f)).normalized();
+        face[2] = rotation.apply(Vec4f(0.f, 0.f, -1.f, 0.f)).normalized();
+        face[3] = rotation.apply(Vec4f(0.f, 0.f, 0.f, -1.f)).normalized();
+    }
+};
+
+inline Rotation4D Rotation4D::fromLocalPlane(const FaceDirection &face, int axis1, int axis2, float angleRad)
+{
+    if (axis1 < 0 || axis1 > 3 || axis2 < 0 || axis2 > 3)
+    {
+        return Rotation4D::identity();
     }
 
-    // void faceForwardToward(const Vec4f &direction)
-    // {
-    //     // to faceRight to a certain direction,
-    //     // calculate the Rotation4D quaternions set that would do that in the minimal steps
-    //     // somehow return Rotation4D, fed back to object4D rotationState
-    // }
-};
+    if (axis1 == axis2)
+    {
+        return Rotation4D::identity();
+    }
+
+    if (axis1 > axis2)
+    {
+        std::swap(axis1, axis2);
+        angleRad = -angleRad;
+    }
+
+    if (axis1 == 0 || axis1 == 1)
+    {
+        if (axis2 == 0 || axis2 == 1)
+        {
+            return Rotation4D::fromPlane(face.face[axis1], face.face[axis2], angleRad);
+        }
+        else
+        {
+            return Rotation4D::fromPlane(face.face[axis1], -face.face[axis2], angleRad);
+        }
+    }
+    else if (axis1 == 2 || axis1 == 3)
+    {
+        if (axis2 == 0 || axis2 == 1)
+        {
+            return Rotation4D::fromPlane(-face.face[axis1], face.face[axis2], angleRad);
+        }
+        else
+        {
+            return Rotation4D::fromPlane(-face.face[axis1], -face.face[axis2], angleRad);
+        }
+    }
+}

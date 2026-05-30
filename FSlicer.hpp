@@ -18,498 +18,725 @@ using namespace al;
 // ----------------------------------------------------------------------------
 // Hyperplane slicing (4D -> 3D) at viewer-local w = wPlane.
 //
-// This is a direct translation of the Processing slicer idea, but implemented
-// in a more structured way by slicing *quads* (surface patches) into *segments*.
+// Unified dimension rule (viewer-local hyperplane w = wPlane, codimension 1):
+//   4-cell  (4-simplex, 5 verts) → at most a 3D solid section   → volume mesh
+//   3-simplex (4 verts, 3D flat) → at most a 2D patch in slice → surface mesh
+//   2-simplex (triangle / quad boundary) → at most a 1D curve     → curve mesh
+//   1-simplex (edge)               → at most a 0D point           → point mesh
 //
-// Given a 4D surface described as quads (each quad is 4 vertices around its
-// boundary), intersect that surface with the hyperplane:
-//   local_w == wPlane
-//
-// where "local" is viewer-local 4D coordinates:
-//   local = viewerRot^{-1} * (world - viewer.pos)
-//
-// Each quad intersection yields:
-// - 0 points: no intersection
-// - 2 points: one segment
-// - 4 points: two segments (rare, but possible when the plane cuts twice)
+// Analogous to slicing R^3 with a plane: volume→surface, surface→curve, curve→point.
+// All geometry is supplied in world 4D; Nav4D::toLocal is the only frame change.
 // ----------------------------------------------------------------------------
 
-struct SliceSettings
+class Slicer4D
 {
-    float wPlane{0.0f};
-    float sliceScale{25.0f}; // Processing used x25 for visibility
-    float denomEps{1e-5f};
+public:
+	struct Settings
+	{
+		float wPlane{0.f};
+		float sliceScale{25.f};
+		float denomEps{1e-5f};
+		float quant{1e-3f};
 
-    bool drawPoints{true};
-    float pointSize{4.0f};
+		al::Color volumeColor{0.f, 0.8f, 1.f, 0.18f};
+		al::Color surfaceColor{0.f, 1.f, 0.8f, 0.35f};
+		al::Color curveColor{0.f, 1.f, 0.8f, 1.f};
+		al::Color pointColor{1.f, 1.f, 1.f, 0.55f};
 
-    al::Color color{al::Color(0.0f, 1.0f, 0.8f, 1.0f)}; // cyan-ish
+		bool drawVolume{true};
+		bool drawSurface{true};
+		bool drawCurves{true};
+		bool drawPoints{true};
+		float pointSize{3.5f};
+	};
+
+	/// Slice output partitioned by intrinsic dimension of the cross-section.
+	struct Result
+	{
+		al::Mesh volume;  // TRIANGLES — sections of 4-cells (3D solid in display space)
+		al::Mesh surface; // TRIANGLES — sections of 3-simplices (2D patch in display space)
+		al::Mesh curves;  // LINES    — sections of 2-surfaces (1D in display space)
+		al::Mesh points;  // POINTS   — sections of 1-simplices
+	};
+
+	Slicer4D() = default;
+
+	explicit Slicer4D(const Settings &settings)
+		: mSettings(settings)
+	{
+	}
+
+	const Settings &settings() const { return mSettings; }
+
+	Slicer4D &settings(const Settings &s)
+	{
+		mSettings = s;
+		return *this;
+	}
+
+	void clearGeometry()
+	{
+		mVertsWorld.clear();
+		mCells4.clear();
+		mSimplices3.clear();
+		mQuads2.clear();
+		mTriangles2.clear();
+		mEdges1.clear();
+	}
+
+	void setVerticesWorld(const std::vector<Vec4f> &vertsWorld)
+	{
+		mVertsWorld = vertsWorld;
+	}
+
+	void add4Cell(const std::array<int, 5> &indices) { mCells4.push_back(indices); }
+
+	/// Filled tetrahedron in 4D (3-simplex); slice is at most a 2D region.
+	void add3Simplex(const std::array<int, 4> &indices) { mSimplices3.push_back(indices); }
+
+	/// 2-surface quad (4 boundary vertices); slice is at most a 1D curve.
+	void add2Quad(const std::array<int, 4> &indices) { mQuads2.push_back(indices); }
+
+	/// 2-simplex triangle; slice is at most a segment.
+	void add2Triangle(const std::array<int, 3> &indices) { mTriangles2.push_back(indices); }
+
+	void add1Edge(int a, int b) { mEdges1.emplace_back(a, b); }
+
+	Result slice(const Nav4D &viewer) const
+	{
+		Result out;
+		out.volume.primitive(al::Mesh::TRIANGLES);
+		out.surface.primitive(al::Mesh::TRIANGLES);
+		out.curves.primitive(al::Mesh::LINES);
+		out.points.primitive(al::Mesh::POINTS);
+
+		if (mVertsWorld.empty())
+		{
+			return out;
+		}
+
+		std::vector<Vec4f> vertsLocal(mVertsWorld.size());
+		for (size_t i = 0; i < mVertsWorld.size(); ++i)
+		{
+			vertsLocal[i] = viewer.toLocal(mVertsWorld[i]);
+		}
+
+		std::vector<Tri3> volumeTris;
+		volumeTris.reserve(mCells4.size() * 6);
+
+		for (const auto &cell : mCells4)
+		{
+			slice4Cell(vertsLocal, cell, volumeTris);
+		}
+
+		emitVolumeMesh(out.volume, volumeTris);
+
+		for (const auto &simp : mSimplices3)
+		{
+			slice3Simplex(vertsLocal, simp, out.surface);
+		}
+
+		for (const auto &quad : mQuads2)
+		{
+			slice2Quad(vertsLocal, quad, out.curves, out.points);
+		}
+
+		for (const auto &tri : mTriangles2)
+		{
+			slice2Triangle(vertsLocal, tri, out.curves, out.points);
+		}
+
+		for (const auto &edge : mEdges1)
+		{
+			slice1Edge(vertsLocal, edge, out.points);
+		}
+
+		return out;
+	}
+
+	void draw(al::Graphics &g, const Result &result) const
+	{
+		g.depthTesting(true);
+
+		if (mSettings.drawVolume && !result.volume.vertices().empty())
+		{
+			g.blending(true);
+			g.blendTrans();
+			g.meshColor();
+			g.draw(result.volume);
+			g.blending(false);
+		}
+
+		if (mSettings.drawSurface && !result.surface.vertices().empty())
+		{
+			g.blending(true);
+			g.blendTrans();
+			g.meshColor();
+			g.draw(result.surface);
+			g.blending(false);
+		}
+
+		if (mSettings.drawCurves && !result.curves.vertices().empty())
+		{
+			g.meshColor();
+			g.draw(result.curves);
+		}
+
+		if (mSettings.drawPoints && !result.points.vertices().empty())
+		{
+			g.pointSize(mSettings.pointSize);
+			g.meshColor();
+			g.draw(result.points);
+		}
+	}
+
+private:
+	struct Tri3
+	{
+		al::Vec3f a, b, c;
+	};
+
+	struct QuantKey3
+	{
+		int32_t x, y, z;
+		bool operator==(const QuantKey3 &o) const { return x == o.x && y == o.y && z == o.z; }
+	};
+
+	struct QuantKeyTri
+	{
+		QuantKey3 a, b, c;
+		bool operator==(const QuantKeyTri &o) const
+		{
+			return a == o.a && b == o.b && c == o.c;
+		}
+	};
+
+	struct QuantKeyTriHash
+	{
+		size_t operator()(const QuantKeyTri &k) const
+		{
+			auto h = [](int32_t v) -> size_t
+			{
+				return static_cast<uint32_t>(v) * 2654435761u;
+			};
+			size_t r = h(k.a.x) ^ (h(k.a.y) << 1) ^ (h(k.a.z) << 2);
+			r ^= (h(k.b.x) << 3) ^ (h(k.b.y) << 4) ^ (h(k.b.z) << 5);
+			r ^= (h(k.c.x) << 6) ^ (h(k.c.y) << 7) ^ (h(k.c.z) << 8);
+			return r;
+		}
+	};
+
+	Settings mSettings{};
+	std::vector<Vec4f> mVertsWorld;
+	std::vector<std::array<int, 5>> mCells4;
+	std::vector<std::array<int, 4>> mSimplices3;
+	std::vector<std::array<int, 4>> mQuads2;
+	std::vector<std::array<int, 3>> mTriangles2;
+	std::vector<std::pair<int, int>> mEdges1;
+
+	static bool edgeCrossesWPlane(float w0, float w1, float wPlane)
+	{
+		return (w0 <= wPlane && w1 >= wPlane) || (w0 >= wPlane && w1 <= wPlane);
+	}
+
+	static al::Vec3f local4DToSlice3D(const Vec4f &pLocal, float sliceScale)
+	{
+		return al::Vec3f(pLocal.x * sliceScale, pLocal.y * sliceScale, pLocal.z * sliceScale);
+	}
+
+	bool intersectEdge(
+		const Vec4f &a,
+		const Vec4f &b,
+		Vec4f &out4,
+		al::Vec3f &out3) const
+	{
+		if (!edgeCrossesWPlane(a.w, b.w, mSettings.wPlane))
+		{
+			return false;
+		}
+
+		const float denom = b.w - a.w;
+		if (std::fabs(denom) <= mSettings.denomEps)
+		{
+			return false;
+		}
+
+		const float t = (mSettings.wPlane - a.w) / denom;
+		if (t < 0.f || t > 1.f)
+		{
+			return false;
+		}
+
+		out4 = a + (b - a) * t;
+		out3 = local4DToSlice3D(out4, mSettings.sliceScale);
+		return true;
+	}
+
+	static QuantKey3 quantize3(const al::Vec3f &p, float q)
+	{
+		const float inv = 1.f / q;
+		return QuantKey3{
+			static_cast<int32_t>(std::lround(p.x * inv)),
+			static_cast<int32_t>(std::lround(p.y * inv)),
+			static_cast<int32_t>(std::lround(p.z * inv))};
+	}
+
+	static QuantKeyTri makeTriKey(const al::Vec3f &p0, const al::Vec3f &p1, const al::Vec3f &p2, float q)
+	{
+		QuantKey3 k0 = quantize3(p0, q);
+		QuantKey3 k1 = quantize3(p1, q);
+		QuantKey3 k2 = quantize3(p2, q);
+
+		auto less = [](const QuantKey3 &a, const QuantKey3 &b)
+		{
+			if (a.x != b.x)
+			{
+				return a.x < b.x;
+			}
+			if (a.y != b.y)
+			{
+				return a.y < b.y;
+			}
+			return a.z < b.z;
+		};
+
+		QuantKey3 a = k0, b = k1, c = k2;
+		if (less(b, a))
+		{
+			std::swap(a, b);
+		}
+		if (less(c, b))
+		{
+			std::swap(b, c);
+		}
+		if (less(b, a))
+		{
+			std::swap(a, b);
+		}
+
+		return QuantKeyTri{a, b, c};
+	}
+
+	void dedupePoints(const std::vector<al::Vec3f> &in, std::vector<al::Vec3f> &out) const
+	{
+		out.clear();
+		std::unordered_map<uint64_t, int> seen;
+		seen.reserve(in.size() * 2);
+
+		for (const al::Vec3f &p : in)
+		{
+			const QuantKey3 qk = quantize3(p, mSettings.quant);
+			const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(qk.x)) << 42)
+				^ (static_cast<uint64_t>(static_cast<uint32_t>(qk.y)) << 21)
+				^ static_cast<uint64_t>(static_cast<uint32_t>(qk.z));
+
+			if (seen.find(key) == seen.end())
+			{
+				seen[key] = static_cast<int>(out.size());
+				out.push_back(p);
+			}
+		}
+	}
+
+	void triangulateConvexFan(
+		const std::vector<al::Vec3f> &pts,
+		std::vector<Tri3> &outTris) const
+	{
+		if (pts.size() < 3)
+		{
+			return;
+		}
+
+		for (size_t i = 1; i + 1 < pts.size(); ++i)
+		{
+			outTris.push_back(Tri3{pts[0], pts[i], pts[i + 1]});
+		}
+	}
+
+	void slice4Cell(
+		const std::vector<Vec4f> &vertsLocal,
+		const std::array<int, 5> &cell,
+		std::vector<Tri3> &outTris) const
+	{
+		static const int ea[10] = {0, 0, 0, 0, 1, 1, 1, 2, 2, 3};
+		static const int eb[10] = {1, 2, 3, 4, 2, 3, 4, 3, 4, 4};
+
+		const Vec4f p4[5] = {
+			vertsLocal[static_cast<size_t>(cell[0])],
+			vertsLocal[static_cast<size_t>(cell[1])],
+			vertsLocal[static_cast<size_t>(cell[2])],
+			vertsLocal[static_cast<size_t>(cell[3])],
+			vertsLocal[static_cast<size_t>(cell[4])]};
+
+		std::vector<al::Vec3f> raw;
+		raw.reserve(10);
+
+		for (int e = 0; e < 10; ++e)
+		{
+			Vec4f q4;
+			al::Vec3f q3;
+			if (intersectEdge(p4[ea[e]], p4[eb[e]], q4, q3))
+			{
+				raw.push_back(q3);
+			}
+		}
+
+		std::vector<al::Vec3f> pts;
+		dedupePoints(raw, pts);
+
+		if (pts.size() < 4)
+		{
+			return;
+		}
+
+		const float eps = 1e-5f;
+		const int n = static_cast<int>(pts.size());
+		for (int i = 0; i < n; ++i)
+		{
+			for (int j = i + 1; j < n; ++j)
+			{
+				for (int k = j + 1; k < n; ++k)
+				{
+					const al::Vec3f a = pts[i];
+					const al::Vec3f b = pts[j];
+					const al::Vec3f c = pts[k];
+
+					const al::Vec3f nrm = al::cross(b - a, c - a);
+					if (nrm.mag() < eps)
+					{
+						continue;
+					}
+
+					int posSide = 0;
+					int negSide = 0;
+					for (int m = 0; m < n; ++m)
+					{
+						if (m == i || m == j || m == k)
+						{
+							continue;
+						}
+						const float d = al::dot(nrm, pts[m] - a);
+						if (d > eps)
+						{
+							posSide++;
+						}
+						else if (d < -eps)
+						{
+							negSide++;
+						}
+					}
+
+					if (posSide && negSide)
+					{
+						continue;
+					}
+
+					outTris.push_back(Tri3{a, b, c});
+				}
+			}
+		}
+	}
+
+	void emitVolumeMesh(al::Mesh &mesh, const std::vector<Tri3> &tris) const
+	{
+		std::unordered_map<QuantKeyTri, int, QuantKeyTriHash> triCounts;
+		triCounts.reserve(tris.size() * 2);
+
+		for (const Tri3 &t : tris)
+		{
+			const QuantKeyTri key = makeTriKey(t.a, t.b, t.c, mSettings.quant);
+			triCounts[key] += 1;
+		}
+
+		for (const Tri3 &t : tris)
+		{
+			const QuantKeyTri key = makeTriKey(t.a, t.b, t.c, mSettings.quant);
+			if (triCounts[key] != 1)
+			{
+				continue;
+			}
+
+			mesh.color(mSettings.volumeColor);
+			mesh.vertex(t.a);
+			mesh.color(mSettings.volumeColor);
+			mesh.vertex(t.b);
+			mesh.color(mSettings.volumeColor);
+			mesh.vertex(t.c);
+		}
+	}
+
+	void slice3Simplex(
+		const std::vector<Vec4f> &vertsLocal,
+		const std::array<int, 4> &simp,
+		al::Mesh &surface) const
+	{
+		static const int ea[6] = {0, 0, 0, 1, 1, 2};
+		static const int eb[6] = {1, 2, 3, 2, 3, 3};
+
+		const Vec4f p4[4] = {
+			vertsLocal[static_cast<size_t>(simp[0])],
+			vertsLocal[static_cast<size_t>(simp[1])],
+			vertsLocal[static_cast<size_t>(simp[2])],
+			vertsLocal[static_cast<size_t>(simp[3])]};
+
+		std::vector<al::Vec3f> raw;
+		raw.reserve(6);
+
+		for (int e = 0; e < 6; ++e)
+		{
+			Vec4f q4;
+			al::Vec3f q3;
+			if (intersectEdge(p4[ea[e]], p4[eb[e]], q4, q3))
+			{
+				raw.push_back(q3);
+			}
+		}
+
+		std::vector<al::Vec3f> pts;
+		dedupePoints(raw, pts);
+
+		if (pts.size() < 3)
+		{
+			return;
+		}
+
+		std::vector<Tri3> tris;
+		triangulateConvexFan(pts, tris);
+
+		for (const Tri3 &t : tris)
+		{
+			surface.color(mSettings.surfaceColor);
+			surface.vertex(t.a);
+			surface.color(mSettings.surfaceColor);
+			surface.vertex(t.b);
+			surface.color(mSettings.surfaceColor);
+			surface.vertex(t.c);
+		}
+	}
+
+	void slice2Quad(
+		const std::vector<Vec4f> &vertsLocal,
+		const std::array<int, 4> &quad,
+		al::Mesh &curves,
+		al::Mesh &points) const
+	{
+		static const int ea[4] = {0, 1, 2, 3};
+		static const int eb[4] = {1, 2, 3, 0};
+
+		const Vec4f p4[4] = {
+			vertsLocal[static_cast<size_t>(quad[0])],
+			vertsLocal[static_cast<size_t>(quad[1])],
+			vertsLocal[static_cast<size_t>(quad[2])],
+			vertsLocal[static_cast<size_t>(quad[3])]};
+
+		al::Vec3f isect[4];
+		int isectCount = 0;
+
+		for (int e = 0; e < 4; ++e)
+		{
+			Vec4f q4;
+			al::Vec3f q3;
+			if (intersectEdge(p4[ea[e]], p4[eb[e]], q4, q3))
+			{
+				isect[isectCount++] = q3;
+				if (isectCount == 4)
+				{
+					break;
+				}
+			}
+		}
+
+		auto emitSegment = [&](const al::Vec3f &a, const al::Vec3f &b)
+		{
+			curves.color(mSettings.curveColor);
+			curves.vertex(a);
+			curves.color(mSettings.curveColor);
+			curves.vertex(b);
+
+			if (mSettings.drawPoints)
+			{
+				points.color(mSettings.pointColor);
+				points.vertex(a);
+				points.color(mSettings.pointColor);
+				points.vertex(b);
+			}
+		};
+
+		if (isectCount == 2)
+		{
+			emitSegment(isect[0], isect[1]);
+		}
+		else if (isectCount == 4)
+		{
+			emitSegment(isect[0], isect[1]);
+			emitSegment(isect[2], isect[3]);
+		}
+	}
+
+	void slice2Triangle(
+		const std::vector<Vec4f> &vertsLocal,
+		const std::array<int, 3> &tri,
+		al::Mesh &curves,
+		al::Mesh &points) const
+	{
+		static const int ea[3] = {0, 1, 2};
+		static const int eb[3] = {1, 2, 0};
+
+		const Vec4f p4[3] = {
+			vertsLocal[static_cast<size_t>(tri[0])],
+			vertsLocal[static_cast<size_t>(tri[1])],
+			vertsLocal[static_cast<size_t>(tri[2])]};
+
+		al::Vec3f isect[3];
+		int isectCount = 0;
+
+		for (int e = 0; e < 3; ++e)
+		{
+			Vec4f q4;
+			al::Vec3f q3;
+			if (intersectEdge(p4[ea[e]], p4[eb[e]], q4, q3))
+			{
+				isect[isectCount++] = q3;
+			}
+		}
+
+		if (isectCount == 2)
+		{
+			curves.color(mSettings.curveColor);
+			curves.vertex(isect[0]);
+			curves.color(mSettings.curveColor);
+			curves.vertex(isect[1]);
+
+			if (mSettings.drawPoints)
+			{
+				points.color(mSettings.pointColor);
+				points.vertex(isect[0]);
+				points.color(mSettings.pointColor);
+				points.vertex(isect[1]);
+			}
+		}
+	}
+
+	void slice1Edge(
+		const std::vector<Vec4f> &vertsLocal,
+		const std::pair<int, int> &edge,
+		al::Mesh &points) const
+	{
+		Vec4f q4;
+		al::Vec3f q3;
+		if (intersectEdge(
+				vertsLocal[static_cast<size_t>(edge.first)],
+				vertsLocal[static_cast<size_t>(edge.second)],
+				q4,
+				q3))
+		{
+			points.color(mSettings.pointColor);
+			points.vertex(q3);
+		}
+	}
 };
+
+// --- Legacy types / shims (map onto Slicer4D) ---
+
+using SliceSettings = Slicer4D::Settings;
+using HyperSliceSettings = Slicer4D::Settings;
 
 struct SliceResult
 {
-    al::Mesh segments;
-    al::Mesh points;
-};
-
-struct HyperSliceSettings
-{
-    float wPlane{0.0f};
-    float sliceScale{25.0f};
-    float denomEps{1e-5f};
-
-    // Rendering
-    al::Color fillColor{al::Color(0.0f, 0.8f, 1.0f, 0.18f)};
-    al::Color edgeColor{al::Color(1.0f, 1.0f, 1.0f, 0.20f)};
-    al::Color pointColor{al::Color(1.0f, 1.0f, 1.0f, 0.55f)};
-    bool drawEdges{true};
-    bool drawPoints{true};
-    float pointSize{3.5f};
-
-    // Quantization for internal-face cancellation
-    float quant{1e-3f};
+	al::Mesh segments;
+	al::Mesh points;
 };
 
 struct HyperSliceResult
 {
-    al::Mesh triangles;
-    al::Mesh edges;
-    al::Mesh points;
+	al::Mesh triangles;
+	al::Mesh edges;
+	al::Mesh points;
 };
 
-inline bool edgeIntersectsPlane(float w0, float w1, float wPlane)
-{
-    return (w0 <= wPlane && w1 >= wPlane) || (w0 >= wPlane && w1 <= wPlane);
-}
-
-inline al::Vec3f slicePointTo3D(const Vec4f &pLocal, float sliceScale)
-{
-    return al::Vec3f(pLocal.x * sliceScale, pLocal.y * sliceScale, pLocal.z * sliceScale);
-}
-
 inline SliceResult sliceQuadsViewerLocal(
-    const Object4D &viewer,
-    const std::vector<Vec4f> &vertsWorld,
-    const std::vector<std::array<int, 4>> &quads,
-    const SliceSettings &settings)
+	const Nav4D &viewer,
+	const std::vector<Vec4f> &vertsWorld,
+	const std::vector<std::array<int, 4>> &quads,
+	const SliceSettings &settings)
 {
-    SliceResult out;
-    out.segments.primitive(al::Mesh::LINES);
-    out.points.primitive(al::Mesh::POINTS);
+	Slicer4D slicer(settings);
+	slicer.setVerticesWorld(vertsWorld);
+	for (const auto &q : quads)
+	{
+		slicer.add2Quad(q);
+	}
 
-    if (vertsWorld.empty() || quads.empty())
-    {
-        return out;
-    }
+	const Slicer4D::Result r = slicer.slice(viewer);
+	SliceResult out;
+	out.segments = r.curves;
+	out.points = r.points;
+	return out;
+}
 
-    // Precompute viewer-local vertices so slicing is consistent with the viewer.
-    std::vector<Vec4f> vertsLocal;
-    vertsLocal.resize(vertsWorld.size());
-    for (size_t i = 0; i < vertsWorld.size(); ++i)
-    {
-        vertsLocal[i] = toViewerLocal(viewer, vertsWorld[i]);
-    }
+inline HyperSliceResult slice4SimplicesViewerLocal(
+	const Nav4D &viewer,
+	const std::vector<Vec4f> &vertsWorld,
+	const std::vector<std::array<int, 5>> &simplices,
+	const HyperSliceSettings &settings)
+{
+	Slicer4D slicer(settings);
+	slicer.setVerticesWorld(vertsWorld);
+	for (const auto &s : simplices)
+	{
+		slicer.add4Cell(s);
+	}
 
-    // Edges on quad perimeter in winding order (0-1-2-3-0).
-    static const int edgeA[4] = {0, 1, 2, 3};
-    static const int edgeB[4] = {1, 2, 3, 0};
+	const Slicer4D::Result r = slicer.slice(viewer);
 
-    for (const auto &q : quads)
-    {
-        Vec4f p[4] = {
-            vertsLocal[q[0]],
-            vertsLocal[q[1]],
-            vertsLocal[q[2]],
-            vertsLocal[q[3]],
-        };
+	HyperSliceResult out;
+	out.triangles = r.volume;
+	out.points = r.points;
 
-        // Collect intersection points along quad boundary.
-        al::Vec3f isect[4];
-        int isectCount = 0;
+	if (settings.drawVolume && !r.volume.vertices().empty())
+	{
+		out.edges.primitive(al::Mesh::LINES);
+		const auto &v = r.volume.vertices();
+		for (size_t i = 0; i + 2 < v.size(); i += 3)
+		{
+			out.edges.color(settings.volumeColor);
+			out.edges.vertex(v[i + 0]);
+			out.edges.color(settings.volumeColor);
+			out.edges.vertex(v[i + 1]);
 
-        for (int e = 0; e < 4; ++e)
-        {
-            const Vec4f &a = p[edgeA[e]];
-            const Vec4f &b = p[edgeB[e]];
+			out.edges.color(settings.volumeColor);
+			out.edges.vertex(v[i + 1]);
+			out.edges.color(settings.volumeColor);
+			out.edges.vertex(v[i + 2]);
 
-            if (!edgeIntersectsPlane(a.w, b.w, settings.wPlane))
-            {
-                continue;
-            }
+			out.edges.color(settings.volumeColor);
+			out.edges.vertex(v[i + 2]);
+			out.edges.color(settings.volumeColor);
+			out.edges.vertex(v[i + 0]);
+		}
+	}
 
-            const float denom = (b.w - a.w);
-            if (std::fabs(denom) <= settings.denomEps)
-            {
-                continue;
-            }
-
-            const float t = (settings.wPlane - a.w) / denom;
-            if (t < 0.0f || t > 1.0f)
-            {
-                continue;
-            }
-
-            const Vec4f p4 = a + (b - a) * t;
-            isect[isectCount++] = slicePointTo3D(p4, settings.sliceScale);
-            if (isectCount == 4)
-            {
-                break;
-            }
-        }
-
-        if (isectCount == 2)
-        {
-            out.segments.color(settings.color);
-            out.segments.vertex(isect[0]);
-            out.segments.color(settings.color);
-            out.segments.vertex(isect[1]);
-
-            if (settings.drawPoints)
-            {
-                out.points.color(settings.color);
-                out.points.vertex(isect[0]);
-                out.points.color(settings.color);
-                out.points.vertex(isect[1]);
-            }
-        }
-        else if (isectCount == 4)
-        {
-            // Connect in order along perimeter: (0-1) and (2-3).
-            out.segments.color(settings.color);
-            out.segments.vertex(isect[0]);
-            out.segments.color(settings.color);
-            out.segments.vertex(isect[1]);
-
-            out.segments.color(settings.color);
-            out.segments.vertex(isect[2]);
-            out.segments.color(settings.color);
-            out.segments.vertex(isect[3]);
-
-            if (settings.drawPoints)
-            {
-                for (int i = 0; i < 4; ++i)
-                {
-                    out.points.color(settings.color);
-                    out.points.vertex(isect[i]);
-                }
-            }
-        }
-    }
-
-    return out;
+	return out;
 }
 
 inline void drawSliceResult(al::Graphics &g, const SliceResult &r, const SliceSettings &settings)
 {
-    g.depthTesting(true);
-    g.meshColor();
-    g.draw(r.segments);
-
-    if (settings.drawPoints)
-    {
-        g.pointSize(settings.pointSize);
-        g.meshColor();
-        g.draw(r.points);
-    }
-}
-
-// ----------------------------------------------------------------------------
-// Exact hypervolume slicing: 4-simplices -> boundary triangle mesh
-// ----------------------------------------------------------------------------
-
-struct QuantKey3
-{
-    int32_t x, y, z;
-    bool operator==(const QuantKey3 &o) const { return x == o.x && y == o.y && z == o.z; }
-};
-
-struct QuantKeyTri
-{
-    QuantKey3 a, b, c;
-    bool operator==(const QuantKeyTri &o) const
-    {
-        return a == o.a && b == o.b && c == o.c;
-    }
-};
-
-struct QuantKeyTriHash
-{
-    size_t operator()(const QuantKeyTri &k) const
-    {
-        auto h = [](int32_t v) -> size_t
-        { return static_cast<uint32_t>(v) * 2654435761u; };
-        size_t r = h(k.a.x) ^ (h(k.a.y) << 1) ^ (h(k.a.z) << 2);
-        r ^= (h(k.b.x) << 3) ^ (h(k.b.y) << 4) ^ (h(k.b.z) << 5);
-        r ^= (h(k.c.x) << 6) ^ (h(k.c.y) << 7) ^ (h(k.c.z) << 8);
-        return r;
-    }
-};
-
-inline QuantKey3 quantize3(const al::Vec3f &p, float q)
-{
-    const float inv = 1.0f / q;
-    return QuantKey3{
-        static_cast<int32_t>(std::lround(p.x * inv)),
-        static_cast<int32_t>(std::lround(p.y * inv)),
-        static_cast<int32_t>(std::lround(p.z * inv))};
-}
-
-inline QuantKeyTri makeTriKey(const al::Vec3f &p0, const al::Vec3f &p1, const al::Vec3f &p2, float q)
-{
-    QuantKey3 k0 = quantize3(p0, q);
-    QuantKey3 k1 = quantize3(p1, q);
-    QuantKey3 k2 = quantize3(p2, q);
-
-    // sort lexicographically
-    auto less = [](const QuantKey3 &a, const QuantKey3 &b)
-    {
-        if (a.x != b.x)
-            return a.x < b.x;
-        if (a.y != b.y)
-            return a.y < b.y;
-        return a.z < b.z;
-    };
-
-    QuantKey3 a = k0, b = k1, c = k2;
-    if (less(b, a))
-        std::swap(a, b);
-    if (less(c, b))
-        std::swap(b, c);
-    if (less(b, a))
-        std::swap(a, b);
-
-    return QuantKeyTri{a, b, c};
-}
-
-inline void emitEdgesFromTriangles(al::Mesh &edges, const al::Mesh &tris, const al::Color &c)
-{
-    edges.primitive(al::Mesh::LINES);
-    edges.reset();
-
-    const auto &v = tris.vertices();
-    for (size_t i = 0; i + 2 < v.size(); i += 3)
-    {
-        edges.color(c);
-        edges.vertex(v[i + 0]);
-        edges.color(c);
-        edges.vertex(v[i + 1]);
-
-        edges.color(c);
-        edges.vertex(v[i + 1]);
-        edges.color(c);
-        edges.vertex(v[i + 2]);
-
-        edges.color(c);
-        edges.vertex(v[i + 2]);
-        edges.color(c);
-        edges.vertex(v[i + 0]);
-    }
-}
-
-inline HyperSliceResult slice4SimplicesViewerLocal(
-    const Object4D &viewer,
-    const std::vector<Vec4f> &vertsWorld,
-    const std::vector<std::array<int, 5>> &simplices,
-    const HyperSliceSettings &settings)
-{
-    HyperSliceResult out;
-    out.triangles.primitive(al::Mesh::TRIANGLES);
-    out.edges.primitive(al::Mesh::LINES);
-    out.points.primitive(al::Mesh::POINTS);
-
-    if (vertsWorld.empty() || simplices.empty())
-    {
-        return out;
-    }
-
-    // Viewer-local vertices
-    std::vector<Vec4f> vertsLocal;
-    vertsLocal.resize(vertsWorld.size());
-    for (size_t i = 0; i < vertsWorld.size(); ++i)
-    {
-        vertsLocal[i] = toViewerLocal(viewer, vertsWorld[i]);
-    }
-
-    // Edge list of a 4-simplex (5 vertices -> 10 edges)
-    static const int EA[10] = {0, 0, 0, 0, 1, 1, 1, 2, 2, 3};
-    static const int EB[10] = {1, 2, 3, 4, 2, 3, 4, 3, 4, 4};
-
-    struct Tri
-    {
-        al::Vec3f a, b, c;
-    };
-
-    std::vector<Tri> tris;
-    tris.reserve(simplices.size() * 6);
-
-    // For each simplex: collect intersection points on edges; then triangulate the
-    // convex hull boundary of the intersection polyhedron.
-    for (const auto &s : simplices)
-    {
-        Vec4f p4[5] = {
-            vertsLocal[s[0]],
-            vertsLocal[s[1]],
-            vertsLocal[s[2]],
-            vertsLocal[s[3]],
-            vertsLocal[s[4]]};
-
-        al::Vec3f ip[10];
-        int ipCount = 0;
-
-        for (int e = 0; e < 10; ++e)
-        {
-            const Vec4f &a = p4[EA[e]];
-            const Vec4f &b = p4[EB[e]];
-            if (!edgeIntersectsPlane(a.w, b.w, settings.wPlane))
-            {
-                continue;
-            }
-            const float denom = b.w - a.w;
-            if (std::fabs(denom) <= settings.denomEps)
-            {
-                continue;
-            }
-            const float t = (settings.wPlane - a.w) / denom;
-            if (t < 0.0f || t > 1.0f)
-            {
-                continue;
-            }
-            const Vec4f q4 = a + (b - a) * t;
-            ip[ipCount++] = slicePointTo3D(q4, settings.sliceScale);
-            if (ipCount == 10)
-                break;
-        }
-
-        // Deduplicate points by quantization.
-        std::vector<al::Vec3f> pts;
-        pts.reserve(static_cast<size_t>(ipCount));
-        std::unordered_map<uint64_t, int> seen;
-        seen.reserve(static_cast<size_t>(ipCount) * 2);
-        for (int i = 0; i < ipCount; ++i)
-        {
-            const QuantKey3 qk = quantize3(ip[i], settings.quant);
-            const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(qk.x)) << 42) ^ (static_cast<uint64_t>(static_cast<uint32_t>(qk.y)) << 21) ^ static_cast<uint64_t>(static_cast<uint32_t>(qk.z));
-            if (seen.find(key) == seen.end())
-            {
-                seen[key] = static_cast<int>(pts.size());
-                pts.push_back(ip[i]);
-            }
-        }
-
-        if (pts.size() < 4)
-        {
-            continue; // not a 3D polyhedron
-        }
-
-        // Convex hull brute-force for <= 5 points:
-        // For every triple (i,j,k), determine if it forms a hull face by checking
-        // all other points are on one side of the plane.
-        const float eps = 1e-5f;
-        const int n = static_cast<int>(pts.size());
-        for (int i = 0; i < n; ++i)
-        {
-            for (int j = i + 1; j < n; ++j)
-            {
-                for (int k = j + 1; k < n; ++k)
-                {
-                    const al::Vec3f a = pts[i];
-                    const al::Vec3f b = pts[j];
-                    const al::Vec3f c = pts[k];
-
-                    const al::Vec3f nrm = al::cross(b - a, c - a);
-                    const float nl = nrm.mag();
-                    if (nl < eps)
-                    {
-                        continue;
-                    }
-
-                    int posSide = 0;
-                    int negSide = 0;
-                    for (int m = 0; m < n; ++m)
-                    {
-                        if (m == i || m == j || m == k)
-                            continue;
-                        const float d = al::dot(nrm, pts[m] - a);
-                        if (d > eps)
-                            posSide++;
-                        else if (d < -eps)
-                            negSide++;
-                    }
-
-                    if (posSide && negSide)
-                    {
-                        continue; // not a hull face
-                    }
-
-                    // Pick a consistent orientation (doesn't matter for our cancellation key)
-                    tris.push_back(Tri{a, b, c});
-                }
-            }
-        }
-    }
-
-    // Cancel internal faces by counting identical triangles (quantized, sorted vertices).
-    std::unordered_map<QuantKeyTri, int, QuantKeyTriHash> triCounts;
-    triCounts.reserve(tris.size() * 2);
-    for (const auto &t : tris)
-    {
-        const auto key = makeTriKey(t.a, t.b, t.c, settings.quant);
-        triCounts[key] += 1;
-    }
-
-    for (const auto &t : tris)
-    {
-        const auto key = makeTriKey(t.a, t.b, t.c, settings.quant);
-        if (triCounts[key] != 1)
-        {
-            continue;
-        }
-        out.triangles.color(settings.fillColor);
-        out.triangles.vertex(t.a);
-        out.triangles.color(settings.fillColor);
-        out.triangles.vertex(t.b);
-        out.triangles.color(settings.fillColor);
-        out.triangles.vertex(t.c);
-    }
-
-    if (settings.drawEdges)
-    {
-        emitEdgesFromTriangles(out.edges, out.triangles, settings.edgeColor);
-    }
-
-    if (settings.drawPoints)
-    {
-        out.points.reset();
-        out.points.primitive(al::Mesh::POINTS);
-        for (const auto &v : out.triangles.vertices())
-        {
-            out.points.color(settings.pointColor);
-            out.points.vertex(v);
-        }
-    }
-
-    return out;
+	Slicer4D::Result bundle;
+	bundle.curves = r.segments;
+	bundle.points = r.points;
+	Slicer4D(settings).draw(g, bundle);
 }
 
 inline void drawHyperSlice(al::Graphics &g, const HyperSliceResult &r, const HyperSliceSettings &settings)
 {
-    g.depthTesting(true);
-    g.blending(true);
-    g.blendTrans();
-    g.meshColor();
-    g.draw(r.triangles);
-    g.blending(false);
+	Slicer4D::Result bundle;
+	bundle.volume = r.triangles;
+	bundle.points = r.points;
 
-    if (settings.drawEdges)
-    {
-        g.meshColor();
-        g.draw(r.edges);
-    }
+	if (settings.drawVolume && !r.triangles.vertices().empty())
+	{
+		bundle.curves = r.edges;
+	}
 
-    if (settings.drawPoints)
-    {
-        g.pointSize(settings.pointSize);
-        g.meshColor();
-        g.draw(r.points);
-    }
+	Slicer4D(settings).draw(g, bundle);
 }

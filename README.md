@@ -87,7 +87,7 @@ The frame is **orthonormal** and **right-handed** in **R⁴** when derived from 
 | Module | Role |
 |--------|------|
 | `FProjecter` (planned) | Perspective reduction along **N̂** (**w** depth cue) → see-through 3D meshes |
-| `Fslicer` | Hyperplane cross-section → solid 3D meshes |
+| `FSlicer` | Hyperplane cross-section → solid 3D meshes |
 | `Manifolds4D` | Shared helpers (e.g. world → viewer-local); projection formulas in use today |
 
 Output of both reducers: **3D vertex coordinates** in viewer-local **(x_3D, y_3D, z_3D)** suitable for `al::Mesh` and Allolib `Graphics`.
@@ -128,7 +128,7 @@ When **p_local** lies on the hyperplane **H** (Section 6), **p_local · N̂ = 0*
 
 ## 5. Rotations in R⁴
 
-This section restates the rotation mathematics (formerly `Rotation.md`) and maps symbols to `Rotation4D` in `Fmath.hpp`.
+This section restates the rotation mathematics (formerly `Rotation.md`) and maps symbols to `Rotation4D` in `FMath.hpp`.
 
 ### 5.1 Group structure
 
@@ -177,7 +177,7 @@ $$
 
 | Operation | Math | Code |
 |-----------|------|------|
-| Apply new rotation after current | **q_L'** = **q_L,new** · **q_L**, **q_R'** = **q_R** · **q_R,new** | `Rotation4D::prepend()`, `Object4D::applyRotation()` |
+| Apply new rotation after current | **q_L'** = **q_L,new** · **q_L**, **q_R'** = **q_R** · **q_R,new** | `Rotation4D::append()`, `Object4D::appendRotation()` |
 
 Left factors multiply on the **left**; right factors on the **right**.
 
@@ -293,7 +293,7 @@ A 4D hypersurface is tiled by **3-simplices** (tetrahedra) or higher cells whose
 
 Map **P_int** to **(x_3D, y_3D, z_3D)** via Section 4.3.
 
-Code: `Fslicer.hpp`, `slice4SimplicesViewerLocal()`.
+Code: `FSlicer.hpp`, `slice4SimplicesViewerLocal()`.
 
 ---
 
@@ -341,7 +341,7 @@ Code today: `drawProjectedShadow()`, `Nautilus4D::drawProjected()`.
 → viewer-local 4D: $p_{\text{local}} = R^{-1}\,(p_{\text{world}} - C)$\n\
 → reduction branch:\n\
 - projection (`FProjecter`) → 3D meshes (transparent)\n\
-- slicing (`Fslicer`) → 3D meshes (solid)\n\
+- slicing (`FSlicer`) → 3D meshes (solid)\n\
 → Allolib Graphics / OpenGL → 2D screen
 
 | Step | Math | Primary code |
@@ -350,7 +350,7 @@ Code today: `drawProjectedShadow()`, `Nautilus4D::drawProjected()`.
 | Navigate | Update **C**, **R** of viewer | `Nav4D`, `applyRotation()` |
 | Localize | **p_local** = **R⁻¹** · (**p_world** − **C**) | `toViewerLocal()` |
 | Project | **s(w)** scaling, visibility in **w** | `FProjecter` (planned), `projectLocal4Dto3D()` |
-| Slice | **H**, SDF, edge cuts, 3D boundary | `Fslicer` |
+| Slice | **H**, SDF, edge cuts, 3D boundary | `FSlicer` |
 | Display | Standard 3D camera & lens on reduced meshes | Allolib `App`, `Graphics`, `Viewpoint` |
 
 The **dimensional boundary** is the **3D mesh in viewer-local coordinates**. Allolib’s `Nav` / `Pose` (3D) applies only **after** reduction, for screen framing—not for 4D exploration.
@@ -361,14 +361,14 @@ The **dimensional boundary** is the **3D mesh in viewer-local coordinates**. All
 
 | Topic | File |
 |-------|------|
-| Vectors, `Rotation4D`, `FaceDirection` | `Fmath.hpp` |
+| Vectors, `Rotation4D`, `FaceDirection` | `FMath.hpp` |
 | Object pose | `Object4D.hpp` |
 | 4D viewer (planned API) | `Nav4D.hpp` |
 | World → local, projection helpers | `Manifolds4D.hpp` |
-| Slicing | `Fslicer.hpp` |
+| Slicing | `FSlicer.hpp` |
 | Projection (planned) | `FProjecter.hpp` |
 | Rotation reference (legacy prose) | `Rotation.md` |
-| Application | `Fapp.cpp` |
+| Application | `FApp.cpp` |
 
 ---
 

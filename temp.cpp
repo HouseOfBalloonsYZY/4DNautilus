@@ -47,6 +47,7 @@ struct FourDApp : public App
         viewer.setRotation(Rotation4D::identity());
 
         imguiInit();
+        navControl().disable();
     }
 
     void onAnimate(double dt) override

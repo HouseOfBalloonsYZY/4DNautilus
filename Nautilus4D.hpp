@@ -25,6 +25,157 @@ using namespace al;
 // ----------------------------------------------------------------------------
 class Nautilus4D : public Object4D
 {
+private:
+    std::vector<Vec4f> vertices_;   // local (object) space
+    std::vector<float> hyperDists_; // |v| in 4D, based on local vertices (no translation)
+
+    // Processing defaults: tSteps=3000, vSteps=24
+    int tSteps_{3000};
+    int vSteps_{24};
+
+    // Path constants
+    float GR_{(1.0f + std::sqrt(5.0f)) / 2.0f};
+    float E_{2.718281828f};
+    float PI_{3.14159265358979323846f};
+
+    // Dynamic multipliers (user-controlled)
+    float m1_{1.0f};
+    float m2_{1.0f};
+    float m3_{1.0f};
+
+    // Growth parameters (Processing defaults)
+    float a_{0.05f};
+    float b_{0.06f};
+    float tubeGrow_{0.06f};
+    float tubeScale_{0.6f};
+    float maxT_{90.0f};
+
+    // Tangent sampling delta (Processing uses 0.01)
+    float deltaTangent_{0.01f};
+
+    // Rendering window (Processing RangeSlider defaults visibleSteps=250)
+    bool selectiveDisplay_{true};
+    int startRing_{0};
+    int visibleRings_{250};
+
+    // Vertex dots (Processing draws every other ring+v; we use a stride knob)
+    bool drawVertexDots_{true};
+    int pointStride_{2}; // 2 -> roughly match k+=2, v+=2
+    float pointSize_{3.0f};
+
+    static float hyperNorm4(const Vec4f &v)
+    {
+        return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w);
+    }
+
+    static float dot4(const Vec4f &a, const Vec4f &b)
+    {
+        return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+    }
+
+    float ringParamT(int ringIndex) const
+    {
+        if (tSteps_ <= 1)
+        {
+            return 0.0f;
+        }
+        const float u = static_cast<float>(ringIndex) / static_cast<float>(tSteps_ - 1);
+        return u * maxT_;
+    }
+
+    Vec4f getSpiralPoint(float t) const
+    {
+        const float r = a_ * std::exp(b_ * t);
+
+        const float theta = (GR_ * m1_) * t;
+        const float phi = (E_ * m2_) * t;
+        const float chi = (PI_ * m3_) * t;
+
+        const float x = r * std::cos(chi);
+        const float y = r * std::sin(chi) * std::cos(phi);
+        const float z = r * std::sin(chi) * std::sin(phi) * std::cos(theta);
+        const float w = r * std::sin(chi) * std::sin(phi) * std::sin(theta);
+
+        return Vec4f(x, y, z, w);
+    }
+
+    void generateGeometry()
+    {
+        vertices_.clear();
+        hyperDists_.clear();
+
+        vertices_.reserve(static_cast<size_t>(tSteps_) * static_cast<size_t>(vSteps_));
+        hyperDists_.reserve(static_cast<size_t>(tSteps_) * static_cast<size_t>(vSteps_));
+
+        for (int i = 0; i < tSteps_; ++i)
+        {
+            const float t = (tSteps_ > 1)
+                                ? (static_cast<float>(i) / static_cast<float>(tSteps_ - 1)) * maxT_
+                                : 0.f;
+
+            const Vec4f center = getSpiralPoint(t);
+            const Vec4f nextP = getSpiralPoint(t + deltaTangent_);
+
+            Vec4f tangent = nextP - center;
+            const float tMag = hyperNorm4(tangent);
+            if (tMag > 1e-7f)
+            {
+                tangent *= (1.f / tMag);
+            }
+
+            // Choose a stable axis to build a basis orthogonal to tangent.
+            Vec4f aAxis(1.f, 0.f, 0.f, 0.f);
+            const bool useY = (std::fabs(tangent.x) > 0.9f);
+            if (useY)
+            {
+                aAxis = Vec4f(0.f, 1.f, 0.f, 0.f);
+            }
+
+            Vec4f bAxis(0.f, 1.f, 0.f, 0.f);
+            if (useY)
+            {
+                bAxis = Vec4f(0.f, 0.f, 1.f, 0.f);
+            }
+
+            // n1 = normalize(aAxis - proj(tangent) * aAxis)
+            const float dot1 = dot4(aAxis, tangent);
+            Vec4f n1 = aAxis - tangent * dot1;
+            const float n1Mag = hyperNorm4(n1);
+            if (n1Mag > 1e-7f)
+            {
+                n1 *= (1.f / n1Mag);
+            }
+
+            // n2 = normalize( (bAxis - proj(tangent) * bAxis) - proj(n1) )
+            const float dotT = dot4(bAxis, tangent);
+            Vec4f t2 = bAxis - tangent * dotT;
+
+            const float dotN1 = dot4(t2, n1);
+            Vec4f n2 = t2 - n1 * dotN1;
+            const float n2Mag = hyperNorm4(n2);
+            if (n2Mag > 1e-7f)
+            {
+                n2 *= (1.f / n2Mag);
+            }
+
+            const float rTube = (a_ * std::exp(tubeGrow_ * t)) * tubeScale_;
+
+            for (int j = 0; j < vSteps_; ++j)
+            {
+                const float vAngle = (vSteps_ > 0)
+                                         ? (static_cast<float>(j) / static_cast<float>(vSteps_)) * (2.f * PI_)
+                                         : 0.f;
+
+                const float cv = std::cos(vAngle);
+                const float sv = std::sin(vAngle);
+
+                const Vec4f p = center + (n1 * (rTube * cv)) + (n2 * (rTube * sv));
+                vertices_.push_back(p);
+                hyperDists_.push_back(hyperNorm4(p));
+            }
+        }
+    }
+
 public:
     Nautilus4D()
     {
@@ -189,14 +340,30 @@ public:
     void drawImGuiControls()
     {
         ImGui::Separator();
-        ImGui::Text("4D Nautilus controls");
+        ImGui::Text("4D Nautilus (rings / spiral)");
 
-        ImGui::Checkbox("Selective display", &selectiveDisplay_);
+        ImGui::Text("Total rings: %d", tSteps_);
+        ImGui::Checkbox("Ring window only", &selectiveDisplay_);
+        ImGui::SameLine();
+        if (ImGui::Button("Show all rings"))
+        {
+            selectiveDisplay_ = false;
+        }
 
         if (selectiveDisplay_)
         {
-            ImGui::SliderInt("Start ring", &startRing_, 0, tSteps_ - 1);
-            ImGui::SliderInt("Visible rings", &visibleRings_, 50, std::min(1000, tSteps_));
+            ImGui::SliderInt("Start ring", &startRing_, 0, std::max(0, tSteps_ - 1));
+            visibleRings_ = std::max(1, std::min(visibleRings_, tSteps_));
+            ImGui::SliderInt("Visible rings", &visibleRings_, 1, tSteps_);
+            ImGui::Text(
+                "Drawing rings %d .. %d (%d rings)",
+                projectionStartRing(),
+                projectionStartRing() + projectionRingCount() - 1,
+                projectionRingCount());
+        }
+        else
+        {
+            ImGui::TextUnformatted("Drawing all rings");
         }
 
         bool regen = false;
@@ -215,156 +382,4 @@ public:
             generateGeometry();
         }
     }
-
-private:
-    std::vector<Vec4f> vertices_;   // local (object) space
-    std::vector<float> hyperDists_; // |v| in 4D, based on local vertices (no translation)
-
-    // Processing defaults: tSteps=3000, vSteps=24
-    int tSteps_{3000};
-    int vSteps_{24};
-
-    // Path constants
-    float GR_{(1.0f + std::sqrt(5.0f)) / 2.0f};
-    float E_{2.718281828f};
-    float PI_{3.14159265358979323846f};
-
-    // Dynamic multipliers (user-controlled)
-    float m1_{1.0f};
-    float m2_{1.0f};
-    float m3_{1.0f};
-
-    // Growth parameters (Processing defaults)
-    float a_{0.05f};
-    float b_{0.06f};
-    float tubeGrow_{0.06f};
-    float tubeScale_{0.6f};
-    float maxT_{90.0f};
-
-    // Tangent sampling delta (Processing uses 0.01)
-    float deltaTangent_{0.01f};
-
-    // Rendering window (Processing RangeSlider defaults visibleSteps=250)
-    bool selectiveDisplay_{true};
-    int startRing_{0};
-    int visibleRings_{250};
-
-    // Vertex dots (Processing draws every other ring+v; we use a stride knob)
-    bool drawVertexDots_{true};
-    int pointStride_{2}; // 2 -> roughly match k+=2, v+=2
-    float pointSize_{3.0f};
-
-    static float hyperNorm4(const Vec4f &v)
-    {
-        return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w);
-    }
-
-    static float dot4(const Vec4f &a, const Vec4f &b)
-    {
-        return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
-    }
-
-    float ringParamT(int ringIndex) const
-    {
-        if (tSteps_ <= 1)
-        {
-            return 0.0f;
-        }
-        const float u = static_cast<float>(ringIndex) / static_cast<float>(tSteps_ - 1);
-        return u * maxT_;
-    }
-
-    Vec4f getSpiralPoint(float t) const
-    {
-        const float r = a_ * std::exp(b_ * t);
-
-        const float theta = (GR_ * m1_) * t;
-        const float phi = (E_ * m2_) * t;
-        const float chi = (PI_ * m3_) * t;
-
-        const float x = r * std::cos(chi);
-        const float y = r * std::sin(chi) * std::cos(phi);
-        const float z = r * std::sin(chi) * std::sin(phi) * std::cos(theta);
-        const float w = r * std::sin(chi) * std::sin(phi) * std::sin(theta);
-
-        return Vec4f(x, y, z, w);
-    }
-
-    void generateGeometry()
-    {
-        vertices_.clear();
-        hyperDists_.clear();
-
-        vertices_.reserve(static_cast<size_t>(tSteps_) * static_cast<size_t>(vSteps_));
-        hyperDists_.reserve(static_cast<size_t>(tSteps_) * static_cast<size_t>(vSteps_));
-
-        for (int i = 0; i < tSteps_; ++i)
-        {
-            const float t = (tSteps_ > 1)
-                                ? (static_cast<float>(i) / static_cast<float>(tSteps_ - 1)) * maxT_
-                                : 0.f;
-
-            const Vec4f center = getSpiralPoint(t);
-            const Vec4f nextP = getSpiralPoint(t + deltaTangent_);
-
-            Vec4f tangent = nextP - center;
-            const float tMag = hyperNorm4(tangent);
-            if (tMag > 1e-7f)
-            {
-                tangent *= (1.f / tMag);
-            }
-
-            // Choose a stable axis to build a basis orthogonal to tangent.
-            Vec4f aAxis(1.f, 0.f, 0.f, 0.f);
-            const bool useY = (std::fabs(tangent.x) > 0.9f);
-            if (useY)
-            {
-                aAxis = Vec4f(0.f, 1.f, 0.f, 0.f);
-            }
-
-            Vec4f bAxis(0.f, 1.f, 0.f, 0.f);
-            if (useY)
-            {
-                bAxis = Vec4f(0.f, 0.f, 1.f, 0.f);
-            }
-
-            // n1 = normalize(aAxis - proj(tangent) * aAxis)
-            const float dot1 = dot4(aAxis, tangent);
-            Vec4f n1 = aAxis - tangent * dot1;
-            const float n1Mag = hyperNorm4(n1);
-            if (n1Mag > 1e-7f)
-            {
-                n1 *= (1.f / n1Mag);
-            }
-
-            // n2 = normalize( (bAxis - proj(tangent) * bAxis) - proj(n1) )
-            const float dotT = dot4(bAxis, tangent);
-            Vec4f t2 = bAxis - tangent * dotT;
-
-            const float dotN1 = dot4(t2, n1);
-            Vec4f n2 = t2 - n1 * dotN1;
-            const float n2Mag = hyperNorm4(n2);
-            if (n2Mag > 1e-7f)
-            {
-                n2 *= (1.f / n2Mag);
-            }
-
-            const float rTube = (a_ * std::exp(tubeGrow_ * t)) * tubeScale_;
-
-            for (int j = 0; j < vSteps_; ++j)
-            {
-                const float vAngle = (vSteps_ > 0)
-                                         ? (static_cast<float>(j) / static_cast<float>(vSteps_)) * (2.f * PI_)
-                                         : 0.f;
-
-                const float cv = std::cos(vAngle);
-                const float sv = std::sin(vAngle);
-
-                const Vec4f p = center + (n1 * (rTube * cv)) + (n2 * (rTube * sv));
-                vertices_.push_back(p);
-                hyperDists_.push_back(hyperNorm4(p));
-            }
-        }
-    }
-
 };
