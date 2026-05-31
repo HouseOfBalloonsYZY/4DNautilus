@@ -3,7 +3,7 @@
 #include "al/graphics/al_Shapes.hpp"
 
 #include "4DNautilusHypervolume.hpp"
-#include "FProjection.hpp"
+#include "FProjectorPlane.hpp"
 #include "FSlicer.hpp"
 #include "Nav4D.hpp"
 #include "Nautilus4D.hpp"
@@ -105,16 +105,16 @@ struct FourDApp : public App
 		g.clear(0.1);
 		g.depthTesting(true);
 
-		Projection4D projection(projectionSettings);
+		ProjectorPlane projector(projectionSettings);
 
 		if (renderMode == RenderMode::Projection)
 		{
 			g.viewport(0, 0, fbWidth(), fbHeight());
-			drawNautilusProjection(g, projection);
+			drawNautilusProjection(g, projector);
 
 			if (showWorldAxes)
 			{
-				projection.drawWorldAxes(g, camera4D);
+				projector.drawWorldAxes(g, camera4D);
 			}
 		}
 		else
@@ -122,10 +122,10 @@ struct FourDApp : public App
 			if (splitView)
 			{
 				g.viewport(0, 0, fbWidth() / 2, fbHeight());
-				drawNautilusProjection(g, projection);
+				drawNautilusProjection(g, projector);
 				if (showWorldAxes)
 				{
-					projection.drawWorldAxes(g, camera4D);
+					projector.drawWorldAxes(g, camera4D);
 				}
 
 				g.viewport(fbWidth() / 2, 0, fbWidth() / 2, fbHeight());
@@ -189,10 +189,10 @@ struct FourDApp : public App
 		{
 			ImGui::Text("Projection (orange/white tube)");
 			int mode = static_cast<int>(projectionSettings.mode);
-			ImGui::RadioButton("1-point", &mode, static_cast<int>(ProjectionMode::OnePoint));
+			ImGui::RadioButton("1-point", &mode, static_cast<int>(Perspective::OnePoint));
 			ImGui::SameLine();
-			ImGui::RadioButton("2-point (x)", &mode, static_cast<int>(ProjectionMode::TwoPoint));
-			projectionSettings.mode = static_cast<ProjectionMode>(mode);
+			ImGui::RadioButton("2-point (x)", &mode, static_cast<int>(Perspective::TwoPoint));
+			projectionSettings.mode = static_cast<Perspective>(mode);
 			ImGui::SliderFloat("Vanish X distance", &projectionSettings.vanishX, 4.f, 80.f, "%.1f");
 			ImGui::Separator();
 		}
@@ -294,7 +294,7 @@ struct FourDApp : public App
 		ImGui::PopID();
 	}
 
-	void drawNautilusProjection(Graphics &g, const Projection4D &projection)
+	void drawNautilusProjection(Graphics &g, const ProjectorPlane &projector)
 	{
 		const std::vector<Vec4f> &verticesLocal = nautilus.verticesLocal();
 		const std::vector<float> &hyperDists = nautilus.hyperDistsLocal();
@@ -315,6 +315,7 @@ struct FourDApp : public App
 
 		std::vector<Vec3f> proj(windowVerts);
 		std::vector<float> dists(windowVerts);
+		std::vector<bool> visible(windowVerts, false);
 
 		float minD = std::numeric_limits<float>::max();
 		float maxD = std::numeric_limits<float>::lowest();
@@ -328,11 +329,18 @@ struct FourDApp : public App
 				const int localIdx = r * vSteps + v;
 				const size_t winIdx = static_cast<size_t>(k * vSteps + v);
 
-				const Vec4f vWorld = Projection4D::objectToWorld(
+				const Vec4f vWorld = ProjectorPlane::objectToWorld(
 					nautilus,
 					verticesLocal[static_cast<size_t>(localIdx)]);
 
-				proj[winIdx] = projection.projectWorld(camera4D, vWorld);
+				Vec3f p;
+				if (!projector.tryProjectWorld(camera4D, vWorld, p))
+				{
+					continue;
+				}
+
+				proj[winIdx] = p;
+				visible[winIdx] = true;
 				dists[winIdx] = hyperDists[static_cast<size_t>(localIdx)];
 
 				minD = std::min(minD, dists[winIdx]);
@@ -359,17 +367,25 @@ struct FourDApp : public App
 				const size_t nextV = static_cast<size_t>(k * vSteps + ((v + 1) % vSteps));
 				const size_t nextT = static_cast<size_t>((k + 1) * vSteps + v);
 
+				if (!visible[curr])
+				{
+					continue;
+				}
+
 				const float t = clamp01((dists[curr] - minD) / (maxD - minD));
 				const al::Color c = nautilusGradientColor(t);
 
-				lines.color(c);
-				lines.vertex(proj[curr]);
-				lines.color(c);
-				lines.vertex(proj[nextV]);
+				if (visible[nextV])
+				{
+					lines.color(c);
+					lines.vertex(proj[curr]);
+					lines.color(c);
+					lines.vertex(proj[nextV]);
+				}
 
 				const int actualRingIndex = (startRingClamped + k) % tSteps;
 				const bool isPhysicalWrap = (actualRingIndex == tSteps - 1);
-				if (!isPhysicalWrap)
+				if (!isPhysicalWrap && visible[nextT])
 				{
 					lines.color(c);
 					lines.vertex(proj[curr]);
@@ -391,7 +407,7 @@ struct FourDApp : public App
 				for (int v = 0; v < vSteps; v += pointStride)
 				{
 					const size_t idx = static_cast<size_t>(k * vSteps + v);
-					if (idx >= windowVerts)
+					if (idx >= windowVerts || !visible[idx])
 					{
 						continue;
 					}
@@ -403,11 +419,11 @@ struct FourDApp : public App
 			}
 		}
 
-		projection.drawLineMesh(g, lines);
+		projector.drawLineMesh(g, lines);
 
 		if (nautilus.drawVertexDots() && !points.vertices().empty())
 		{
-			projection.drawLineMesh(g, points);
+			projector.drawLineMesh(g, points);
 		}
 
 		g.blending(false);

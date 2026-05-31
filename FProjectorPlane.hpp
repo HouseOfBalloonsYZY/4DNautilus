@@ -19,43 +19,43 @@ using namespace al;
 //   kata = +w
 //   ana  = -w
 //
-// One-point: uniform foreshortening of (x,y,z) from local w.
+// Visibility (Nav4D local, non-360 camera):
+//   Keep points with local z <= 0 (in front; viewer looks along -z) and
+//   local w <= 0 (ana only). Discard local z > 0 (behind) and w > 0 (kata).
+//
+// One-point: uniform foreshortening of (x,y,z) from local w (ana branch only).
 // Two-point: same w scaling on y,z; x compresses toward vanishing points at
 //            +vanishX and -vanishX on the projected x-axis.
 // ----------------------------------------------------------------------------
 
-
-/// Universal 4D→3D projection layer. Operates on arbitrary world geometry via Nav4D::toLocal.
-class Projection4D
+enum class Perspective
 {
-private:
-	ProjectionSettings mSettings{};
+	OnePoint = 0,
+	TwoPoint = 1
+};
 
-	/// Foreshortening from viewer-local w: ana (-w) shrinks, kata (+w) grows.
-	static float scaleFromLocalW(float wl)
-	{
-		if (wl < 0.f) // ana
-		{
-			const float t = -wl;
-			return 1.f / (1.f + t);
-		}
+struct ProjectionSettings
+{
+	Perspective mode{Perspective::TwoPoint};
 
-		// kata (+w)
-		const float t = wl;
-		return 1.f + t;
-	}
+	/// Distance from origin to each x-axis vanishing point (two-point mode).
+	float vanishX{100000.f};
+};
 
+/// 4D→3D projection with Nav4D half-space culling (front + ana only).
+class ProjectorPlane
+{
 public:
-	Projection4D() = default;
+	ProjectorPlane() = default;
 
-	explicit Projection4D(const ProjectionSettings &settings)
+	explicit ProjectorPlane(const ProjectionSettings &settings)
 		: mSettings(settings)
 	{
 	}
 
 	const ProjectionSettings &settings() const { return mSettings; }
 
-	Projection4D &settings(const ProjectionSettings &s)
+	ProjectorPlane &settings(const ProjectionSettings &s)
 	{
 		mSettings = s;
 		return *this;
@@ -67,33 +67,30 @@ public:
 		return object.pos + object.rotationState.apply(local);
 	}
 
-	/// Project a point already in viewer-local 4D.
-	Vec3f projectLocal(const Vec4f &local) const
+	/// True when the point lies in the visible half-spaces (local z <= 0, local w <= 0).
+	static bool isProjectableLocal(const Vec4f &local)
 	{
-		const float s = scaleFromLocalW(local.w);
-        const float x = local.x * s;
-		const float y = local.y * s;
-		const float z = local.z * s;
-
-        // one-point perspective: uniform scaling of x with w
-		if (mSettings.mode == Perspective::OnePoint)
-		{
-			return Vec3f(x, y, z);
-		}
-
-        // two-point perspective: x compresses toward vanishing points at ±vanishX
-        const float eps = 1e-7f; // super small non-zero threshold for negligible angle
-		const float vanishPoint = std::max(mSettings.vanishX, eps);
-		const float xAbsolute = std::fabs(x);
-		if (xAbsolute < eps)
-		{
-			return Vec3f(0.f, y, z);
-		}
-		const float xTwoPoints = x * vanishPoint / (vanishPoint + xAbsolute);
-		return Vec3f(xTwoPoints, y, z);
+		return local.z <= 0.f && local.w <= 0.f;
 	}
 
-	/// Depth cue from viewer-local w: kata (+w) → blue-grey, ana (-w) → blue-bright.
+	/// Project viewer-local 4D if projectable; returns false when culled (behind or kata).
+	bool tryProjectLocal(const Vec4f &local, Vec3f &out) const
+	{
+		if (!isProjectableLocal(local))
+		{
+			return false;
+		}
+		out = projectLocalVisible(local);
+		return true;
+	}
+
+	/// Project a point already in viewer-local 4D (caller must ensure isProjectableLocal).
+	Vec3f projectLocal(const Vec4f &local) const
+	{
+		return projectLocalVisible(local);
+	}
+
+	/// Depth cue from viewer-local w: ana (-w) → blue-bright (kata branch unused after cull).
 	al::Color colorFromLocalW(float wl) const
 	{
 		const float scale = 10.f;
@@ -117,13 +114,19 @@ public:
 		return c;
 	}
 
-	/// World 4D → viewer-local → projected 3D.
+	/// World 4D → viewer-local → projected 3D (culled when behind or kata).
+	bool tryProjectWorld(const Nav4D &viewer, const Vec4f &world, Vec3f &out) const
+	{
+		return tryProjectLocal(viewer.toLocal(world), out);
+	}
+
+	/// World 4D → projected 3D; only defined when tryProjectWorld succeeds.
 	Vec3f projectWorld(const Nav4D &viewer, const Vec4f &world) const
 	{
 		return projectLocal(viewer.toLocal(world));
 	}
 
-	/// Batch: world vertices → projected 3D (same order as input).
+	/// Batch: world vertices → projected 3D (culled vertices omitted; order not index-stable).
 	std::vector<Vec3f> projectWorldVertices(
 		const Nav4D &viewer,
 		const std::vector<Vec4f> &vertsWorld) const
@@ -132,12 +135,16 @@ public:
 		out.reserve(vertsWorld.size());
 		for (const Vec4f &w : vertsWorld)
 		{
-			out.push_back(projectWorld(viewer, w));
+			Vec3f p;
+			if (tryProjectWorld(viewer, w, p))
+			{
+				out.push_back(p);
+			}
 		}
 		return out;
 	}
 
-	/// Indexed line soup in world 4D → projected line mesh data.
+	/// Indexed line soup in world 4D → projected line mesh (edges with culled endpoints skipped).
 	al::Mesh buildProjectedLineMesh(
 		const Nav4D &viewer,
 		const std::vector<Vec4f> &vertsWorld,
@@ -156,8 +163,13 @@ public:
 		{
 			const Vec4f aLocal = viewer.toLocal(vertsWorld[e.first]);
 			const Vec4f bLocal = viewer.toLocal(vertsWorld[e.second]);
-			const Vec3f pa = projectLocal(aLocal);
-			const Vec3f pb = projectLocal(bLocal);
+
+			Vec3f pa;
+			Vec3f pb;
+			if (!tryProjectLocal(aLocal, pa) || !tryProjectLocal(bLocal, pb))
+			{
+				continue;
+			}
 
 			if (colorByLocalW)
 			{
@@ -213,7 +225,7 @@ public:
 			Vec4f(length, 0.f, 0.f, 0.f),
 			Vec4f(0.f, length, 0.f, 0.f),
 			Vec4f(0.f, 0.f, length, 0.f),
-			Vec4f(0.f, 0.f, 0.f, length)}; // +w = kata
+			Vec4f(0.f, 0.f, 0.f, length)}; // +w = kata (culled)
 
 		const al::Color colors[4] = {
 			al::Color(1.f, 0.f, 0.f, 1.f),
@@ -221,10 +233,20 @@ public:
 			al::Color(0.f, 0.4f, 1.f, 1.f),
 			al::Color(0.f, 1.f, 0.f, 1.f)};
 
+		Vec3f p0;
+		if (!tryProjectWorld(viewer, origin4, p0))
+		{
+			return;
+		}
+
 		for (int i = 0; i < 4; ++i)
 		{
-			const Vec3f p0 = projectWorld(viewer, origin4);
-			const Vec3f p1 = projectWorld(viewer, axes4[i]);
+			Vec3f p1;
+			if (!tryProjectWorld(viewer, axes4[i], p1))
+			{
+				continue;
+			}
+
 			m.color(colors[i]);
 			m.vertex(p0);
 			m.color(colors[i]);
@@ -234,5 +256,37 @@ public:
 		drawLineMesh(g, m);
 	}
 
+private:
+	ProjectionSettings mSettings{};
 
+	/// Project viewer-local 4D that is already known projectable (z <= 0, w <= 0).
+	Vec3f projectLocalVisible(const Vec4f &local) const
+	{
+		const float s = scaleFromLocalW(local.w);
+		const float y = local.y * s;
+		const float z = local.z * s;
+
+		if (mSettings.mode == Perspective::OnePoint)
+		{
+			return Vec3f(local.x * s, y, z);
+		}
+
+		const float x = local.x * s;
+		const float vp = std::max(mSettings.vanishX, 1e-4f);
+		const float ax = std::fabs(x);
+		if (ax < 1e-8f)
+		{
+			return Vec3f(0.f, y, z);
+		}
+
+		const float xProj = x * vp / (vp + ax);
+		return Vec3f(xProj, y, z);
+	}
+
+	/// Foreshortening from viewer-local w (ana only after cull: w <= 0).
+	static float scaleFromLocalW(float wl)
+	{
+		const float t = -wl; // wl <= 0 on visible points
+		return 1.f / (1.f + t);
+	}
 };
