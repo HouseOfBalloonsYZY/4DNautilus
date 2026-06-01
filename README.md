@@ -30,9 +30,9 @@ World axes **(x, y, z, w)** match Allolib / OpenGL for the spatial part:
 | **+y** | Up | `Vec4f` component 1 |
 | **+z** | Backward (into the screen) | `Vec4f` component 2 |
 | **+w** | Kata (toward the viewer / “in front” in 4D) | `Vec4f` component 3 |
-| **−w** | Ana (away from the viewer) | negative **w** |
 
-A **4D point** is **p** = (x, y, z, w). Code: `Vec4f`.
+A **4D point** is $p = (x, y, z, w)$ , `Vec4f position = (x, y, z, w)`.
+
 
 ---
 
@@ -42,9 +42,9 @@ A **4D point** is **p** = (x, y, z, w). Code: `Vec4f`.
 
 An object in 4D has:
 
-- **Position** **C_world** in **R⁴** — code: `Object4D::pos`
-- **Orientation** **R** in **SO(4)** — code: `Object4D::rotationState` (`Rotation4D`)
-- **Orthonormal frame** (optional cache) — code: `Object4D::faceDirection` (`FaceDirection`)
+- **World position P** in **R⁴** `Object4D::pos`
+- **Orientation R** in **SO(4)** `Object4D::rotationState` (`Rotation4D`)
+- **Orthonormal frame** `Object4D::faceDirection` (`FaceDirection`)
 
 Subclasses (e.g. hypervolume nautilus) store geometry in **object-local** 4D coordinates; world points are obtained by applying **R** and translation.
 
@@ -52,11 +52,11 @@ Subclasses (e.g. hypervolume nautilus) store geometry in **object-local** 4D coo
 
 The **4D camera** is a `Nav4D` instance (extends `Object4D`). It supplies:
 
-- Observer position **C**
+- Observer position **P**
 - Orientation **R**
 - Viewer basis vectors (Section 4)
 
-Navigation updates **C** and **R** **before** any projection or slicing.
+Navigation updates **P** and **R** **before** any projection or slicing.
 
 ### 3.3 Viewer basis — `FaceDirection`
 
@@ -82,13 +82,23 @@ The negations align the stored frame with OpenGL (forward = negative **z**) and 
 
 The frame is **orthonormal** and **right-handed** in **R⁴** when derived from a proper **R** in **SO(4)**.
 
+The default viewer facing direction is 
+```c++
+std::array<Vec4f, 4> face =
+        {
+            Vec4f(1.f, 0.f, 0.f, 0.f), // right
+            Vec4f(0.f, 1.f, 0.f, 0.f), // up
+            Vec4f(0.f, 0.f, -1.f, 0.f), // forward (OpenGL -z)
+            Vec4f(0.f, 0.f, 0.f, -1.f) // ana (negative w, arbitrary mimicing OpenGL standard)
+        };
+```
+
 ### 3.4 Reduction modules
 
 | Module | Role |
 |--------|------|
-| `FProjecter` (planned) | Perspective reduction along **N̂** (**w** depth cue) → see-through 3D meshes |
+| `FProjecter` | Perspective reduction along **N̂** (**w** depth cue) → see-through 3D meshes |
 | `FSlicer` | Hyperplane cross-section → solid 3D meshes |
-| `Manifolds4D` | Shared helpers (e.g. world → viewer-local); projection formulas in use today |
 
 Output of both reducers: **3D vertex coordinates** in viewer-local **(x_3D, y_3D, z_3D)** suitable for `al::Mesh` and Allolib `Graphics`.
 
@@ -102,10 +112,10 @@ Geometry and object poses live in **world** 4D coordinates.
 
 ### 4.2 Viewer-local coordinates
 
-For viewer position **C** and orientation **R**, the **viewer-local** point is:
+For viewer position **P** and orientation **R**, the **viewer-local** point is:
 
 $$
-p_{\text{local}} = R^{-1} \cdot (p_{\text{world}} - C)
+p_{\text{local}} = R^{-1} \cdot (p_{\text{world}} - P)
 $$
 
 Code concept: `toViewerLocal(viewer, worldPoint)` in `Manifolds4D.hpp`, using `Rotation4D::inverse()` and `Rotation4D::apply()`.
@@ -333,46 +343,168 @@ Code today: `drawProjectedShadow()`, `Nautilus4D::drawProjected()`.
 
 ---
 
-## 8. End-to-end pipeline
+## 8. Three-layer scene model (World 1 / 2 / 3)
 
-4D objects (world)\n\
-→ pose: `pos` + `rotationState`\n\
-→ Nav4D viewer (world)\n\
-→ viewer-local 4D: $p_{\text{local}} = R^{-1}\,(p_{\text{world}} - C)$\n\
-→ reduction branch:\n\
-- projection (`FProjecter`) → 3D meshes (transparent)\n\
-- slicing (`FSlicer`) → 3D meshes (solid)\n\
-→ Allolib Graphics / OpenGL → 2D screen
+Unlike Allolib’s standard 3D path (world `Vec3f` + GPU **view matrix** → pixels), this project’s **deliverable is 3D mesh geometry** (`al::Mesh`) that Allolib draws with a **fixed** display camera. Reduction is a **CPU-side geometry pass** (GPU later optional).
 
-| Step | Math | Primary code |
-|------|------|----------------|
-| Object in world | **p_world** = **C_obj** + **R_obj** · **p_local** | `Object4D`, subclasses |
-| Navigate | Update **C**, **R** of viewer | `Nav4D`, `applyRotation()` |
-| Localize | **p_local** = **R⁻¹** · (**p_world** − **C**) | `toViewerLocal()` |
-| Project | **s(w)** scaling, visibility in **w** | `FProjecter` (planned), `projectLocal4Dto3D()` |
-| Slice | **H**, SDF, edge cuts, 3D boundary | `FSlicer` |
-| Display | Standard 3D camera & lens on reduced meshes | Allolib `App`, `Graphics`, `Viewpoint` |
+Three **derived layers** sit in the application (conceptually in `FApp`; not all are separate stored buffers yet):
 
-The **dimensional boundary** is the **3D mesh in viewer-local coordinates**. Allolib’s `Nav` / `Pose` (3D) applies only **after** reduction, for screen framing—not for 4D exploration.
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│  World 1 — Navigable 4D world (authoritative)                   │
+│  • Geometry generators (Nautilus4D, hypervolume, …)             │
+│  • Each Object4D: pos, rotationState, object-local verts        │
+│  • World 4D vertex pools + 4D topology (edges, simplices, …)    │
+│  • Nav4D camera pose (also an Object4D)                         │
+└────────────────────────────┬────────────────────────────────────┘
+                             │ Nav4D localize (sync)
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  World 2 — Viewer-local 4D (cache / playground for reducers)  │
+│  • Vec4f positions: p_local = R⁻¹(p_world − C) per vertex       │
+│  • Fixed orthonormal coords (x,y,z,w scalars), NOT faceDirection│
+│  • Topology: references World 1 (see §8.2)                      │
+└────────────────────────────┬────────────────────────────────────┘
+                             │ ProjectorPlane or Slicer4D
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  World 3 — Display 3D (Allolib-ready)                           │
+│  • al::Mesh (Vec3f vertices + connectivity baked in)            │
+│  • Fixed al::Nav at origin / −z for screen framing only         │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Roles:**
+
+| Layer | Owns | Does not own |
+|-------|------|----------------|
+| **Nav4D** | Camera pose; **localize** World 1 → World 2 | Projection, slicing, `al::Mesh` |
+| **Projector / Slicer** | World 2 → World 3 reduction | Object poses, generator parameters |
+| **Generators** | World 1 geometry + 4D topology | Viewer frame, 3D output |
+
+**Invalidation (rebuild World 2 when):** Nav4D moves; any object pose changes; generator parameters change.
+
+**Invalidation (rebuild World 3 when):** World 2 changes; reducer settings change (projection mode, `wPlane`, etc.).
+
+### 8.1 Projection vs slicing in World 3
+
+| | **Projection** | **Slicing** |
+|---|----------------|-------------|
+| **Input** | World 2 positions + World 1 **edge** lists | World 2 positions + World 1 **cell** lists (4-simplices, …) |
+| **Output positions** | One `Vec3f` per surviving 4D vertex (after cull) | **New** intersection points; **w** dropped → $(x,y,z)$ |
+| **Output topology** | **Same** edge graph as World 1 (drop culled edges) | **New** mesh; cross-section triangulation |
+| **World 1 on output** | Connectivity **referenced** when building mesh | Connectivity is **input only**, not carried over |
+
+Slicing **never** “fetches connectivity from World 1” on output — the slice mesh is a generated artifact (`Slicer4D::Result`).
+
+### 8.2 World 2 topology references (one vs many generators)
+
+World 2 stores **localized positions only**. Connectivity stays defined in **World 1** per generator, referenced until World 3 is built.
+
+**Single generator (current):** One vertex array + one edge/simplex list; indices are local to that object. Trivial.
+
+**Multiple generators — two viable patterns:**
+
+**A. Per-object chunks (recommended first)**
+
+Each placed object exports a **geometry source** in World 1:
+
+```text
+GeometrySource {
+  objectId
+  worldVerts[]           // or rebuild from object-local + pose
+  edges[] / cells4[]     // indices into THIS object's vertex array
+}
+```
+
+World 2 holds a **parallel list**:
+
+```text
+LocalizedChunk {
+  positions[]            // same length as source.worldVerts
+  const GeometrySource* source   // non-owning ref into World 1
+}
+```
+
+Nav4D localizes **per chunk**: `positions[i] = toLocal(source.worldVert[i])`. Reducers iterate chunks: for projection, walk each source’s edges; for slicing, feed each source’s cells (or merge first — see B).
+
+**B. Unified scene pool (scale-up)**
+
+`buildWorldScene()` concatenates all objects into one vertex array; each edge/simplex stores **global indices** (with index offsets per object). World 2 is one big `positions[]` aligned 1:1. One pointer pair to global edge/cell lists.
+
+Use **A** for clarity and per-object dirty flags; use **B** when draw/reducer loops must be single-pass and vertex counts are large.
+
+**Rule:** Indices in World 1 topology always mean “vertex $k$ within **this** object’s pool” (local indices) **or** “vertex $k$ in the global pool” (global indices) — pick one convention and stick to it. World 2 never renumbers; it only transforms positions in place or in a parallel array with the **same indexing**.
+
+### 8.3 World 3 and `al::Mesh`
+
+**Yes — World 3 should be `al::Mesh` (or a small wrapper) for both reducers.**
+
+Allolib does not draw “positions + external connectivity.” `al::Mesh` **is** vertices + optional indices + primitive mode (`LINES`, `TRIANGLES`, `POINTS`).
+
+**Projection:** You do **not** keep World 3 as “Vec3f array + pointer to World 1 edges” at rest. Each sync frame:
+
+1. Read World 2 `Vec4f` + World 1 edge list.
+2. Project each endpoint → `Vec3f`.
+3. **Emit** line/point pairs into `al::Mesh` (skip culled edges).
+
+Connectivity is **baked into** the mesh (line list or index buffer). World 1 edges are the **recipe** during build, not a runtime reference on World 3. Same as today’s `drawNautilusProjection` loop.
+
+**Slicing:** Already produces standalone `al::Mesh` sets (`volume`, `surface`, `curves`, `points`) with new vertices and new connectivity inside each mesh.
+
+Optional wrapper:
+
+```text
+DisplayScene {
+  enum Mode { Projection, Slice };
+  Mode mode;
+  al::Mesh projectionLines;   // or points
+  Slicer4D::Result sliceMeshes;
+}
+```
+
+**CPU first** for localize + reduce; GPU compute is an optional later optimization (localize/project parallelize easily; slicing is harder).
 
 ---
 
-## 9. Related files
+## 9. End-to-end pipeline (summary)
+
+```text
+World 1: generators + Nav4D  (4D world simulation)
+    → localize →  World 2: viewer-local Vec4f  (fixed x,y,z,w frame)
+    → reduce   →  World 3: al::Mesh  (display 3D)
+    → Allolib Graphics + fixed al::Nav  →  2D screen
+```
+
+| Step | Math | Primary code (current / planned) |
+|------|------|----------------------------------|
+| Object in world | **p_world** = **C_obj** + **R_obj** · **p_obj** | `Object4D`, `Nautilus4D`, hypervolume |
+| Navigate | Update viewer **C**, **R** | `Nav4D`, `Object4D::step()` |
+| Localize (World 2) | **p_local** = **R⁻¹** · (**p_world** − **C**) | `Nav4D::toLocal()` |
+| Project (World 3) | **s(w)** scaling, cull, → `Vec3f`; bake edges into `al::Mesh` | `ProjectorPlane` |
+| Slice (World 3) | **w = w_plane**, intersect, triangulate → `al::Mesh` | `Slicer4D` |
+| Display | Standard 3D draw on reduced meshes | `FApp`, `al::Graphics` |
+
+The **dimensional boundary** for 4D meaning is World 2. Allolib’s 3D `Nav` applies **after** World 3 exists, for screen framing only—not for 4D exploration.
+
+---
+
+## 10. Related files
 
 | Topic | File |
 |-------|------|
 | Vectors, `Rotation4D`, `FaceDirection` | `FMath.hpp` |
 | Object pose | `Object4D.hpp` |
-| 4D viewer (planned API) | `Nav4D.hpp` |
+| 4D viewer | `Nav4D.hpp` |
 | World → local, projection helpers | `Manifolds4D.hpp` |
 | Slicing | `FSlicer.hpp` |
-| Projection (planned) | `FProjecter.hpp` |
+| Projection | `FProjection.hpp`, `FProjectorPlane.hpp` |
+| Application / scene layers (planned explicit) | `FApp.cpp` |
 | Rotation reference (legacy prose) | `Rotation.md` |
-| Application | `FApp.cpp` |
 
 ---
 
-## 10. Glossary
+## 11. Glossary
 
 | Term | Meaning |
 |------|---------|
@@ -380,4 +512,7 @@ The **dimensional boundary** is the **3D mesh in viewer-local coordinates**. All
 | **Ana** | Negative **w**; away from the viewer |
 | **Viewer-local** | Coordinates in the Nav4D frame after **R⁻¹ · (p_world − C)** |
 | **Reduction** | Projection or slicing: 4D → 3D display geometry |
+| **World 1 / 2 / 3** | Navigable 4D world; viewer-local 4D cache; display `al::Mesh` |
+| **GeometrySource** | World-1 object: world verts + 4D topology (edges/cells) |
+| **LocalizedChunk** | World-2: viewer-local positions + non-owning ref to one GeometrySource |
 | **Parallel 3-space** | Fixed-**w** affine subspace; “copy of 3D space” at one **w** |

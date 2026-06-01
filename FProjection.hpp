@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Nav4D.hpp"
+#include "FProjectorPlane.hpp"
 
 #include "al/graphics/al_Graphics.hpp"
 #include "al/graphics/al_Mesh.hpp"

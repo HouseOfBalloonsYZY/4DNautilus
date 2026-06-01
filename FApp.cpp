@@ -42,6 +42,7 @@ al::Color nautilusGradientColor(float t)
 struct FourDApp : public App
 {
 	Nav4D camera4D;
+    //std::vector<Object4D> objects4D; // for potential future use with multiple objects, but currently just one Nautilus4D
 	Nautilus4D nautilus;
 	NautilusHypervolume4D hypervolume;
 
