@@ -19,6 +19,7 @@
 #include <limits>
 #include <utility>
 #include <vector>
+#include <random>
 
 using namespace al;
 
