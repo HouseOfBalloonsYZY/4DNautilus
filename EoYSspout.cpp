@@ -47,6 +47,8 @@ al::Color nautilusGradientColor(float t)
 struct EoYSspout : public App
 {
 	static constexpr const char *kSpoutSenderName = "4DNautilus";
+	static constexpr int kSpoutWidth = 10185;
+	static constexpr int kSpoutHeight = 2160;
 
 	Nav4D camera4D = Nav4D(Vec4f(0.f, 0.f, 3.f, 0.f), Rotation4D::identity());
 	Nautilus4D nautilus;
@@ -108,16 +110,16 @@ struct EoYSspout : public App
 		imguiInit();
 		navControl().disable();
 
-		updateSceneFBO(width(), height());
+		updateSceneFBO(kSpoutWidth, kSpoutHeight);
 
 #ifdef _WIN32
 		spoutSender.SetSenderName(kSpoutSenderName);
 #endif
 	}
 
-	void onResize(int w, int h) override
+	void onResize(int /*w*/, int /*h*/) override
 	{
-		updateSceneFBO(w, h);
+		// Spout/FBO output stays at kSpoutWidth x kSpoutHeight; window preview scales independently.
 	}
 
 	void onAnimate(double dt) override
@@ -192,10 +194,16 @@ struct EoYSspout : public App
 
 	void onDraw(Graphics &g) override
 	{
-		const int outW = sceneColorTex.width() > 0 ? sceneColorTex.width() : fbWidth();
-		const int outH = sceneColorTex.height() > 0 ? sceneColorTex.height() : fbHeight();
+		const int outW = kSpoutWidth;
+		const int outH = kSpoutHeight;
 
-		if (outW > 0 && outH > 0)
+		if (sceneColorTex.width() != static_cast<unsigned>(outW)
+			|| sceneColorTex.height() != static_cast<unsigned>(outH))
+		{
+			updateSceneFBO(outW, outH);
+		}
+
+		if (outW > 0 && outH > 0 && sceneColorTex.id() != 0)
 		{
 			sceneFbo.bind();
 			g.viewport(0, 0, outW, outH);
@@ -251,6 +259,7 @@ struct EoYSspout : public App
 
 #ifdef _WIN32
 		ImGui::Text("Spout sender: %s", kSpoutSenderName);
+		ImGui::Text("Spout output: %d x %d", kSpoutWidth, kSpoutHeight);
 		ImGui::Checkbox("Send Spout output", &spoutEnabled);
 		if (spoutSender.IsInitialized())
 		{
