@@ -10,7 +10,8 @@
 #include "Nautilus4D.hpp"
 
 #ifdef _WIN32
-#include "SpoutSender.h"
+// Relative to 4DNautilus/ (works even if CMake include path is not set yet)
+#include "Spout2/SPOUTSDK/SpoutGL/SpoutSender.h"
 #endif
 
 #include <array>
