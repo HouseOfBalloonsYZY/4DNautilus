@@ -64,6 +64,21 @@ public:
         buildHypervolume();
     }
 
+    // Update spiral angular multipliers; rebuilds hypervolume if they change.
+    void updateMultipliers(float nm1, float nm2, float nm3)
+    {
+        const float eps = 1e-3f;
+        if (std::fabs(settings_.m1 - nm1) > eps
+            || std::fabs(settings_.m2 - nm2) > eps
+            || std::fabs(settings_.m3 - nm3) > eps)
+        {
+            settings_.m1 = nm1;
+            settings_.m2 = nm2;
+            settings_.m3 = nm3;
+            rebuild();
+        }
+    }
+
     void drawImGuiControls()
     {
         ImGui::Separator();

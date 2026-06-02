@@ -307,6 +307,7 @@ struct EoYSspout : public App
 
 		splitView = c.splitView;
 		nautilus.updateMultipliers(c.m1, c.m2, c.m3);
+		hypervolume.updateMultipliers(c.m1, c.m2, c.m3);
 		nautilus.rotationState = c.nautilusRot;
 		hypervolume.rotationState = c.hypervolumeRot;
 

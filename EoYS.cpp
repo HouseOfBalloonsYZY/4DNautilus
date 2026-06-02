@@ -68,7 +68,7 @@ struct EoYS : public App
 	static constexpr int kStartRingStep = 20;
 	static constexpr float kSliceScaleFixed = 1.f;
 	static constexpr float kProjectionPointSizeFixed = 8.f;
-	static constexpr double kToggleSwitchHz = 10.0;
+	static constexpr double kToggleSwitchHz = 5.0;
 
 	enum class AutoHoldKey
 	{
@@ -290,6 +290,7 @@ struct EoYS : public App
 
 		splitView = c.splitView;
 		nautilus.updateMultipliers(c.m1, c.m2, c.m3);
+		hypervolume.updateMultipliers(c.m1, c.m2, c.m3);
 		nautilus.rotationState = c.nautilusRot;
 		hypervolume.rotationState = c.hypervolumeRot;
 
