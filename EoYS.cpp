@@ -90,8 +90,6 @@ struct EoYS : public App
 		char branch{'?'};
 		Vec4f homePos{0.f, 0.f, 0.f, 0.f};
 		Rotation4D homeRot = Rotation4D::identity();
-		Rotation4D nautilusRot = Rotation4D::identity();
-		Rotation4D hypervolumeRot = Rotation4D::identity();
 
 		bool showAllRings{true};
 		int visibleRings{250};
@@ -139,7 +137,7 @@ struct EoYS : public App
 
 		// ---- A ----
 		// A: home (0,0,0,0), show all rings
-		// A.A/A.B: initial facing right/left -> +/- 90deg XZ applied once as homeRot
+		// A.A/A.B: initial facing right/left -> +/- 90deg viewer-local XZ in homeRot
 		// A.X: multipliers (4 options)
 		const std::array<std::array<float, 3>, 4> aMultipliers =
 		{{
@@ -149,22 +147,20 @@ struct EoYS : public App
 			{{0.1f, 0.1f, 10.f}},
 		}};
 
+		static const FaceDirection kViewerHomeFace{};
+
 		for (int face = 0; face < 2; ++face)
 		{
-			// XZ "yaw": choose sign so we can get distinct left/right clips.
+			// Viewer-local XZ yaw (face basis at identity home); sign -> left/right clips.
 			const float angle = (face == 0) ? (-3.14159265358979f * 0.5f) : (3.14159265358979f * 0.5f);
-			const Rotation4D xz = Rotation4D::fromGlobalPlane(0, 2, angle);
+			const Rotation4D xz = Rotation4D::fromLocalPlane(kViewerHomeFace, 0, 2, angle);
 
 			for (const auto &m : aMultipliers)
 			{
 				ClipConfig c;
 				c.branch = 'A';
 				c.homePos = Vec4f(0.f, 0.f, 0.f, 0.f);
-				// In A, keep the viewer facing -Z, and rotate the nautilus geometry instead.
-				// This avoids fighting the camera's face basis (and keeps debug -Z stable).
-				c.homeRot = Rotation4D::identity();
-				c.nautilusRot = xz;
-				c.hypervolumeRot = Rotation4D::identity();
+				c.homeRot = xz;
 				c.showAllRings = true;
 				c.splitView = false;
 				c.viewMode = ClipViewMode::ProjectionOnly;
@@ -291,8 +287,6 @@ struct EoYS : public App
 		splitView = c.splitView;
 		nautilus.updateMultipliers(c.m1, c.m2, c.m3);
 		hypervolume.updateMultipliers(c.m1, c.m2, c.m3);
-		nautilus.rotationState = c.nautilusRot;
-		hypervolume.rotationState = c.hypervolumeRot;
 
 		if (c.showAllRings)
 		{

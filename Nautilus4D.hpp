@@ -60,8 +60,8 @@ private:
 
     // Vertex dots (Processing draws every other ring+v; we use a stride knob)
     bool drawVertexDots_{true};
-    int pointStride_{2}; // 2 -> roughly match k+=2, v+=2
-    float pointSize_{3.0f};
+    int pointStride_{1};
+    float pointSize_{8.0f};
 
     static float hyperNorm4(const Vec4f &v)
     {
