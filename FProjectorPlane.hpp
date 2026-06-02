@@ -145,6 +145,7 @@ public:
 	}
 
 	/// Indexed line soup in world 4D → projected line mesh (edges with culled endpoints skipped).
+    // mesh drawn
 	al::Mesh buildProjectedLineMesh(
 		const Nav4D &viewer,
 		const std::vector<Vec4f> &vertsWorld,
@@ -185,6 +186,7 @@ public:
 			}
 		}
 
+        // mesh that was drawn
 		return mesh;
 	}
 

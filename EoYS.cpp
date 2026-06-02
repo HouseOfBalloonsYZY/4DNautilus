@@ -64,6 +64,8 @@ struct EoYS : public App
 	// ---------------- Automated clip system ----------------
 
 	static constexpr double kClipSeconds = 5.0;
+	// Each A leaf is inserted this many times (uniform pick over mClipLeaves).
+	static constexpr int kBranchAClipWeight = 2;
 	static constexpr int kStartRingWrap = 3000;
 	static constexpr int kStartRingStep = 20;
 	static constexpr float kSliceScaleFixed = 1.f;
@@ -167,7 +169,10 @@ struct EoYS : public App
 				c.m1 = m[0];
 				c.m2 = m[1];
 				c.m3 = m[2];
-				pushWithHeldKeys(c);
+				for (int w = 0; w < kBranchAClipWeight; ++w)
+				{
+					pushWithHeldKeys(c);
+				}
 			}
 		}
 
