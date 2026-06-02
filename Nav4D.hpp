@@ -30,6 +30,13 @@ public:
 		mHomeRot = rotationState;
 	}
 
+    void setHome(const Vec4f &homePos, const Rotation4D &homeRot)
+    {
+        mHomePos = homePos;
+        mHomeRot = homeRot;
+        home();
+    }
+
 	void home()
 	{
 		pos = mHomePos;

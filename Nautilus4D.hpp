@@ -182,6 +182,34 @@ public:
         generateGeometry();
     }
 
+	// ---- Runtime controls (non-ImGui) ----
+	// These exist so apps can drive the nautilus procedurally without reaching into ImGui state.
+
+	void setRingWindow(bool enabled)
+	{
+		selectiveDisplay_ = enabled;
+	}
+
+	void setStartRing(int startRing)
+	{
+		startRing_ = startRing;
+	}
+
+	void setVisibleRings(int ringCount)
+	{
+		visibleRings_ = ringCount;
+	}
+
+	void showAllRings()
+	{
+		selectiveDisplay_ = false;
+	}
+
+	void setPointSize(float size)
+	{
+		pointSize_ = size;
+	}
+
     // Update spiral angular multipliers; regenerates geometry if they change.
     void updateMultipliers(float nm1, float nm2, float nm3)
     {
@@ -375,7 +403,7 @@ public:
         // Optional vertex dots (Processing draws "spheres" at sample points; we do GL points).
         ImGui::Checkbox("Vertex points", &drawVertexDots_);
         ImGui::SliderInt("Point stride", &pointStride_, 1, 6);
-        ImGui::SliderFloat("Point size", &pointSize_, 1.0f, 8.0f, "%.1f");
+        ImGui::Text("Point size: %.1f (fixed by app)", pointSize_);
 
         if (regen)
         {

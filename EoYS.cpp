@@ -11,6 +11,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <random>
 #include <utility>
 #include <vector>
 
@@ -41,7 +42,7 @@ al::Color nautilusGradientColor(float t)
 
 struct EoYS : public App
 {
-	Nav4D camera4D = Nav4D(Vec4f(0.f, 0.f, 3.f, 0.f), Rotation4D::identity());
+	Nav4D camera4D;
     //std::vector<Object4D> objects4D; // for potential future use with multiple objects, but currently just one Nautilus4D
 	Nautilus4D nautilus;
 	NautilusHypervolume4D hypervolume;
@@ -60,6 +61,282 @@ struct EoYS : public App
 	bool uiVisible{true};
 	bool showWorldAxes{true};
 
+	// ---------------- Automated clip system ----------------
+
+	static constexpr double kClipSeconds = 5.0;
+	static constexpr int kStartRingWrap = 3000;
+	static constexpr int kStartRingStep = 20;
+	static constexpr float kSliceScaleFixed = 1.f;
+	static constexpr float kProjectionPointSizeFixed = 8.f;
+	static constexpr double kToggleSwitchHz = 10.0;
+
+	enum class AutoHoldKey
+	{
+		Key1 = 0,
+		Key2 = 1,
+		Key3 = 2,
+		Key4 = 3,
+	};
+
+	enum class ClipViewMode
+	{
+		ProjectionOnly = 0,
+		SlicingOnly = 1,
+		ToggleProjectionSlicing = 2,
+	};
+
+	struct ClipConfig
+	{
+		char branch{'?'};
+		Vec4f homePos{0.f, 0.f, 0.f, 0.f};
+		Rotation4D homeRot = Rotation4D::identity();
+		Rotation4D nautilusRot = Rotation4D::identity();
+		Rotation4D hypervolumeRot = Rotation4D::identity();
+
+		bool showAllRings{true};
+		int visibleRings{250};
+		int startRing{0};
+		bool animateStartRing{false};
+
+		float m1{1.f};
+		float m2{1.f};
+		float m3{1.f};
+
+		bool splitView{false};
+		ClipViewMode viewMode{ClipViewMode::ProjectionOnly};
+		AutoHoldKey heldKey{AutoHoldKey::Key1};
+	};
+
+	std::mt19937 mRng{std::random_device{}()};
+	std::vector<ClipConfig> mClipLeaves;
+	size_t mClipIndex{0};
+	double mClipTime{0.0};
+	std::array<float, 6> mAutoRotateSpeedLocal{};
+
+	static std::array<float, 6> addArray6(const std::array<float, 6> &a, const std::array<float, 6> &b)
+	{
+		std::array<float, 6> out{};
+		for (int i = 0; i < 6; ++i)
+		{
+			out[i] = a[i] + b[i];
+		}
+		return out;
+	}
+
+	void buildClipLeaves()
+	{
+		mClipLeaves.clear();
+
+		const auto pushWithHeldKeys = [&](const ClipConfig &base)
+		{
+			for (int k = 0; k < 4; ++k)
+			{
+				ClipConfig c = base;
+				c.heldKey = static_cast<AutoHoldKey>(k);
+				mClipLeaves.push_back(c);
+			}
+		};
+
+		// ---- A ----
+		// A: home (0,0,0,0), show all rings
+		// A.A/A.B: initial facing right/left -> +/- 90deg XZ applied once as homeRot
+		// A.X: multipliers (4 options)
+		const std::array<std::array<float, 3>, 4> aMultipliers =
+		{{
+			{{1.f, 0.1f, 0.1f}},
+			{{0.1f, 1.f, 0.1f}},
+			{{0.1f, 0.1f, 1.f}},
+			{{0.1f, 0.1f, 10.f}},
+		}};
+
+		for (int face = 0; face < 2; ++face)
+		{
+			// XZ "yaw": choose sign so we can get distinct left/right clips.
+			const float angle = (face == 0) ? (-3.14159265358979f * 0.5f) : (3.14159265358979f * 0.5f);
+			const Rotation4D xz = Rotation4D::fromGlobalPlane(0, 2, angle);
+
+			for (const auto &m : aMultipliers)
+			{
+				ClipConfig c;
+				c.branch = 'A';
+				c.homePos = Vec4f(0.f, 0.f, 0.f, 0.f);
+				// In A, keep the viewer facing -Z, and rotate the nautilus geometry instead.
+				// This avoids fighting the camera's face basis (and keeps debug -Z stable).
+				c.homeRot = Rotation4D::identity();
+				c.nautilusRot = xz;
+				c.hypervolumeRot = Rotation4D::identity();
+				c.showAllRings = true;
+				c.splitView = false;
+				c.viewMode = ClipViewMode::ProjectionOnly;
+				c.m1 = m[0];
+				c.m2 = m[1];
+				c.m3 = m[2];
+				pushWithHeldKeys(c);
+			}
+		}
+
+		// ---- B ----
+		// B: home (0,0,3,0)
+
+		// B.A: split view, visible rings 1500, start ring const or animated
+		// B.A.X: multipliers (7 options)
+		const std::array<std::array<float, 3>, 7> bMultipliers7 =
+		{{
+			{{0.1f, 0.1f, 0.1f}},
+			{{1.f, 0.1f, 0.1f}},
+			{{0.1f, 1.f, 0.1f}},
+			{{0.1f, 0.1f, 1.f}},
+			{{10.f, 0.1f, 0.1f}},
+			{{0.1f, 10.f, 0.1f}},
+			{{0.1f, 0.1f, 10.f}},
+		}};
+
+		for (int startAnim = 0; startAnim < 2; ++startAnim)
+		{
+			for (const auto &m : bMultipliers7)
+			{
+				ClipConfig c;
+				c.branch = 'B';
+				c.homePos = Vec4f(0.f, 0.f, 3.f, 0.f);
+				c.homeRot = Rotation4D::identity();
+				c.showAllRings = false;
+				c.visibleRings = 1500;
+				c.startRing = 0;
+				c.animateStartRing = (startAnim == 1);
+				c.splitView = true;
+				c.viewMode = ClipViewMode::SlicingOnly;
+				c.m1 = m[0];
+				c.m2 = m[1];
+				c.m3 = m[2];
+				pushWithHeldKeys(c);
+			}
+		}
+
+		// B.B: not split view
+		// - B.B.A : projection pipeline, either constant projection or toggling proj/slice
+		//   - constant projection: visible rings 3000 (const start) OR visible rings 2000 (animated start)
+		//   - multipliers: 7 options
+		for (int ringsMode = 0; ringsMode < 2; ++ringsMode)
+		{
+			for (const auto &m : bMultipliers7)
+			{
+				ClipConfig c;
+				c.branch = 'B';
+				c.homePos = Vec4f(0.f, 0.f, 3.f, 0.f);
+				c.homeRot = Rotation4D::identity();
+				c.showAllRings = false;
+				c.visibleRings = (ringsMode == 0) ? 3000 : 2000;
+				c.startRing = 0;
+				c.animateStartRing = (ringsMode == 1);
+				c.splitView = false;
+				c.viewMode = ClipViewMode::ProjectionOnly;
+				c.m1 = m[0];
+				c.m2 = m[1];
+				c.m3 = m[2];
+				pushWithHeldKeys(c);
+			}
+		}
+
+		// - B.B.A.B : toggling projection/slicing, multipliers: 7 options (rings fixed at 3000, start ring const)
+		for (const auto &m : bMultipliers7)
+		{
+			ClipConfig c;
+			c.branch = 'B';
+			c.homePos = Vec4f(0.f, 0.f, 3.f, 0.f);
+			c.homeRot = Rotation4D::identity();
+			c.showAllRings = false;
+			c.visibleRings = 3000;
+			c.startRing = 0;
+			c.animateStartRing = false;
+			c.splitView = false;
+			c.viewMode = ClipViewMode::ToggleProjectionSlicing;
+			c.m1 = m[0];
+			c.m2 = m[1];
+			c.m3 = m[2];
+			pushWithHeldKeys(c);
+		}
+
+		// - B.B.B : slicing view only, multipliers: 4 options
+		const std::array<std::array<float, 3>, 4> bMultipliers4 =
+		{{
+			{{0.1f, 0.1f, 0.1f}},
+			{{0.1f, 10.f, 0.1f}},
+			{{0.1f, 0.1f, 10.f}},
+			{{10.f, 10.f, 10.f}},
+		}};
+
+		for (const auto &m : bMultipliers4)
+		{
+			ClipConfig c;
+			c.branch = 'B';
+			c.homePos = Vec4f(0.f, 0.f, 3.f, 0.f);
+			c.homeRot = Rotation4D::identity();
+			c.showAllRings = true;
+			c.splitView = false;
+			c.viewMode = ClipViewMode::SlicingOnly;
+			c.m1 = m[0];
+			c.m2 = m[1];
+			c.m3 = m[2];
+			pushWithHeldKeys(c);
+		}
+	}
+
+	void applyClipConfig(const ClipConfig &c)
+	{
+		camera4D.halt();
+		camera4D.setHome(c.homePos, c.homeRot);
+		camera4D.halt();
+		camera4D.home();
+
+		splitView = c.splitView;
+		nautilus.updateMultipliers(c.m1, c.m2, c.m3);
+		nautilus.rotationState = c.nautilusRot;
+		hypervolume.rotationState = c.hypervolumeRot;
+
+		if (c.showAllRings)
+		{
+			nautilus.showAllRings();
+		}
+		else
+		{
+			nautilus.setRingWindow(true);
+			nautilus.setVisibleRings(c.visibleRings);
+			nautilus.setStartRing(c.startRing);
+		}
+
+		// Auto-held rotation "key" (constant within the clip).
+		mAutoRotateSpeedLocal.fill(0.f);
+		switch (c.heldKey)
+		{
+		case AutoHoldKey::Key1:
+			mAutoRotateSpeedLocal[2] = kRotSpeedDeg * (3.14159265358979f / 180.f);
+			break;
+		case AutoHoldKey::Key2:
+			mAutoRotateSpeedLocal[2] = -kRotSpeedDeg * (3.14159265358979f / 180.f);
+			break;
+		case AutoHoldKey::Key3:
+			mAutoRotateSpeedLocal[4] = kRotSpeedDeg * (3.14159265358979f / 180.f);
+			break;
+		case AutoHoldKey::Key4:
+			mAutoRotateSpeedLocal[4] = -kRotSpeedDeg * (3.14159265358979f / 180.f);
+			break;
+		}
+
+		mClipTime = 0.0;
+	}
+
+	void pickNextClip()
+	{
+		if (mClipLeaves.empty())
+		{
+			buildClipLeaves();
+		}
+
+		std::uniform_int_distribution<size_t> dist(0, mClipLeaves.size() - 1);
+		mClipIndex = dist(mRng);
+		applyClipConfig(mClipLeaves[mClipIndex]);
+	}
+
 	// Input tuning (maps keys/UI to target rates on camera4D; integration lives on Object4D).
 	static constexpr float kMoveSpeed = 1.5f;
 	static constexpr float kRotSpeedDeg = 45.f;
@@ -74,6 +351,13 @@ struct EoYS : public App
 
 		imguiInit();
 		navControl().disable();
+
+		// Fixed output knobs (not user-controlled).
+		sliceSettings.sliceScale = kSliceScaleFixed;
+		nautilus.setPointSize(kProjectionPointSizeFixed);
+
+		buildClipLeaves();
+		pickNextClip();
 	}
 
 	void onAnimate(double dt) override
@@ -90,6 +374,53 @@ struct EoYS : public App
 		if (uiVisible)
 		{
 			drawControlPanel(uiMoveSpeedLocal, uiRotateSpeedLocal, rotSpeedRad);
+		}
+
+		// Hard-coded knobs (not user-controlled).
+		sliceSettings.sliceScale = kSliceScaleFixed;
+		nautilus.setPointSize(kProjectionPointSizeFixed);
+
+		// Clip time + clip changes.
+		mClipTime += dt;
+		if (mClipTime >= kClipSeconds)
+		{
+			pickNextClip();
+		}
+
+		// Apply per-frame clip dynamics.
+		if (!mClipLeaves.empty())
+		{
+			const ClipConfig &c = mClipLeaves[mClipIndex];
+
+			if (!c.showAllRings && c.animateStartRing)
+			{
+				const int frame = static_cast<int>(mClipTime * 60.0);
+				const int start = (frame * kStartRingStep) % kStartRingWrap;
+				nautilus.setStartRing(start);
+			}
+
+			if (c.viewMode == ClipViewMode::ProjectionOnly)
+			{
+				renderMode = RenderMode::Projection;
+			}
+			else if (c.viewMode == ClipViewMode::SlicingOnly)
+			{
+				renderMode = RenderMode::Slicing;
+			}
+			else
+			{
+				// Switch kToggleSwitchHz times/sec (toggle every 1/kToggleSwitchHz seconds).
+				const int phase = static_cast<int>(mClipTime * kToggleSwitchHz) % 2;
+				renderMode = (phase == 0) ? RenderMode::Projection : RenderMode::Slicing;
+			}
+
+			// Apply UI speeds for just this frame, on top of the clip's held-key rotation.
+			camera4D.setMoveSpeedLocal(uiMoveSpeedLocal);
+			camera4D.setRotateSpeedLocal(addArray6(mAutoRotateSpeedLocal, uiRotateSpeedLocal));
+			camera4D.step(dt);
+
+			imguiEndFrame();
+			return;
 		}
 
 		camera4D.addMoveSpeedLocal(uiMoveSpeedLocal);
@@ -173,6 +504,23 @@ struct EoYS : public App
 		ImGui::Text("Toggle panel: H");
 		ImGui::Separator();
 
+		if (!mClipLeaves.empty())
+		{
+			const ClipConfig &c = mClipLeaves[mClipIndex];
+			ImGui::Text("Auto clip: %c  idx %d / %d  t=%.2fs",
+				c.branch,
+				static_cast<int>(mClipIndex),
+				static_cast<int>(mClipLeaves.size()),
+				static_cast<float>(mClipTime));
+		}
+		ImGui::Text("Nav4D pos: (%.2f, %.2f, %.2f, %.2f)",
+			camera4D.pos.x, camera4D.pos.y, camera4D.pos.z, camera4D.pos.w);
+		ImGui::Text("Face -Z: (%.2f, %.2f, %.2f, %.2f)",
+			camera4D.faceDirection.face[2].x,
+			camera4D.faceDirection.face[2].y,
+			camera4D.faceDirection.face[2].z,
+			camera4D.faceDirection.face[2].w);
+
 		ImGui::Checkbox("Show world axes", &showWorldAxes);
 
 		ImGui::Separator();
@@ -202,7 +550,7 @@ struct EoYS : public App
 		{
 			ImGui::Checkbox("Split view", &splitView);
 			ImGui::SliderFloat("Slice w (viewer-local)", &sliceSettings.wPlane, -25.f, 25.f, "%.2f");
-			ImGui::SliderFloat("Slice scale", &sliceSettings.sliceScale, 1.f, 60.f, "%.1f");
+			ImGui::Text("Slice scale: %.1f (fixed)", kSliceScaleFixed);
 			ImGui::Checkbox("Slice solid", &sliceSettings.drawVolume);
 			ImGui::Checkbox("Slice points", &sliceSettings.drawPoints);
 			ImGui::SliderFloat("Slice point size", &sliceSettings.pointSize, 1.f, 10.f, "%.1f");
