@@ -17,7 +17,6 @@ public:
     Nav4D(const Nav4D &) = default;
     Nav4D &operator=(const Nav4D &) = default;
     virtual ~Nav4D() = default;
-
     Nav4D(const Vec4f &homePos, const Rotation4D &homeRot)
         : mHomePos(homePos), mHomeRot(homeRot)
     {

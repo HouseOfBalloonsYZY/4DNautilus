@@ -87,7 +87,7 @@ struct EoYSspout : public App
 	static constexpr int kStartRingStep = 20;
 	static constexpr float kSliceScaleFixed = 1.f;
 	static constexpr float kProjectionPointSizeFixed = 8.f;
-	static constexpr double kToggleSwitchHz = 10.0;
+	static constexpr double kToggleSwitchHz = 4.0;
 
 	enum class AutoHoldKey
 	{
