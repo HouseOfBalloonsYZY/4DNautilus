@@ -1,19 +1,25 @@
 #include "al/app/al_App.hpp"
 #include "al/io/al_Imgui.hpp"
+#include "al/graphics/al_FBO.hpp"
 #include "al/graphics/al_Shapes.hpp"
 
-#include "4DNautilusHypervolume.hpp"
-#include "FProjectorPlane.hpp"
-#include "FSlicer.hpp"
-#include "Nav4D.hpp"
-#include "Nautilus4D.hpp"
+#include "4DNautilus/4DNautilusHypervolume.hpp"
+#include "4DNautilus/FProjectorPlane.hpp"
+#include "4DNautilus/FSlicer.hpp"
+#include "4DNautilus/Nav4D.hpp"
+#include "4DNautilus/Nautilus4D.hpp"
+
+#ifdef _WIN32
+// Relative to 4DNautilus/ (works even if CMake include path is not set yet)
+#include "Spout2/SPOUTSDK/SpoutGL/SpoutSender.h"
+#endif
 
 #include <array>
 #include <cmath>
 #include <limits>
-#include <random>
 #include <utility>
 #include <vector>
+#include <random>
 
 using namespace al;
 
@@ -40,12 +46,23 @@ al::Color nautilusGradientColor(float t)
 
 } // namespace
 
-struct EoYS : public App
+struct EoYSspout : public App
 {
+	static constexpr const char *kSpoutSenderName = "4DNautilus";
+	static constexpr int kSpoutWidth = 10185;
+	static constexpr int kSpoutHeight = 2160;
+
 	Nav4D camera4D;
-    //std::vector<Object4D> objects4D; // for potential future use with multiple objects, but currently just one Nautilus4D
 	Nautilus4D nautilus;
 	NautilusHypervolume4D hypervolume;
+
+	FBO sceneFbo;
+	Texture sceneColorTex;
+	RBO sceneDepthRbo;
+
+#ifdef _WIN32
+	SpoutSender spoutSender;
+#endif
 
 	enum class RenderMode
 	{
@@ -60,11 +77,11 @@ struct EoYS : public App
 
 	bool uiVisible{true};
 	bool showWorldAxes{true};
+	bool spoutEnabled{true};
 
-	// ---------------- Automated clip system ----------------
+    // ---------------- Automated clip system ----------------
 
 	static constexpr double kClipSeconds = 5.0;
-	// Each A leaf is inserted this many times (uniform pick over mClipLeaves).
 	static constexpr int kBranchAClipWeight = 2;
 	static constexpr int kStartRingWrap = 3000;
 	static constexpr int kStartRingStep = 20;
@@ -337,9 +354,30 @@ struct EoYS : public App
 		applyClipConfig(mClipLeaves[mClipIndex]);
 	}
 
-	// Input tuning (maps keys/UI to target rates on camera4D; integration lives on Object4D).
+
+
 	static constexpr float kMoveSpeed = 1.5f;
 	static constexpr float kRotSpeedDeg = 45.f;
+    
+
+	void updateSceneFBO(int w, int h)
+	{
+		if (w <= 0 || h <= 0)
+		{
+			return;
+		}
+
+		const unsigned uw = static_cast<unsigned>(w);
+		const unsigned uh = static_cast<unsigned>(h);
+
+		sceneColorTex.create2D(uw, uh);
+		sceneDepthRbo.resize(uw, uh);
+
+		sceneFbo.bind();
+		sceneFbo.attachTexture2D(sceneColorTex);
+		sceneFbo.attachRBO(sceneDepthRbo);
+		sceneFbo.unbind();
+	}
 
 	void onCreate() override
 	{
@@ -352,12 +390,23 @@ struct EoYS : public App
 		imguiInit();
 		navControl().disable();
 
-		// Fixed output knobs (not user-controlled).
+        // Fixed output knobs (not user-controlled).
 		sliceSettings.sliceScale = kSliceScaleFixed;
 		nautilus.setPointSize(kProjectionPointSizeFixed);
 
 		buildClipLeaves();
 		pickNextClip();
+
+		updateSceneFBO(kSpoutWidth, kSpoutHeight);
+
+#ifdef _WIN32
+		spoutSender.SetSenderName(kSpoutSenderName);
+#endif
+	}
+
+	void onResize(int /*w*/, int /*h*/) override
+	{
+		// Spout/FBO output stays at kSpoutWidth x kSpoutHeight; window preview scales independently.
 	}
 
 	void onAnimate(double dt) override
@@ -366,8 +415,6 @@ struct EoYS : public App
 
 		imguiBeginFrame();
 
-		// UI is polled each frame; add its target rates only for this step (keyboard
-		// rates persist on camera4D via add/sub in onKeyDown/onKeyUp, Nav-style).
 		Vec4f uiMoveSpeedLocal{0.f, 0.f, 0.f, 0.f};
 		std::array<float, 6> uiRotateSpeedLocal{};
 
@@ -376,7 +423,7 @@ struct EoYS : public App
 			drawControlPanel(uiMoveSpeedLocal, uiRotateSpeedLocal, rotSpeedRad);
 		}
 
-		// Hard-coded knobs (not user-controlled).
+        // Hard-coded knobs (not user-controlled).
 		sliceSettings.sliceScale = kSliceScaleFixed;
 		nautilus.setPointSize(kProjectionPointSizeFixed);
 
@@ -432,16 +479,15 @@ struct EoYS : public App
 		imguiEndFrame();
 	}
 
-	void onDraw(Graphics &g) override
+	void drawScene(Graphics &g, int viewW, int viewH)
 	{
-		g.clear(0.1);
 		g.depthTesting(true);
 
 		ProjectorPlane projector(projectionSettings);
 
 		if (renderMode == RenderMode::Projection)
 		{
-			g.viewport(0, 0, fbWidth(), fbHeight());
+			g.viewport(0, 0, viewW, viewH);
 			drawNautilusProjection(g, projector);
 
 			if (showWorldAxes)
@@ -453,18 +499,18 @@ struct EoYS : public App
 		{
 			if (splitView)
 			{
-				g.viewport(0, 0, fbWidth() / 2, fbHeight());
+				g.viewport(0, 0, viewW / 2, viewH);
 				drawNautilusProjection(g, projector);
 				if (showWorldAxes)
 				{
 					projector.drawWorldAxes(g, camera4D);
 				}
 
-				g.viewport(fbWidth() / 2, 0, fbWidth() / 2, fbHeight());
+				g.viewport(viewW / 2, 0, viewW / 2, viewH);
 			}
 			else
 			{
-				g.viewport(0, 0, fbWidth(), fbHeight());
+				g.viewport(0, 0, viewW, viewH);
 			}
 
 			std::vector<Vec4f> vertsWorld;
@@ -478,8 +524,49 @@ struct EoYS : public App
 				sliceSettings);
 			drawHyperSlice(g, slice, sliceSettings);
 		}
+	}
+
+	void onDraw(Graphics &g) override
+	{
+		const int outW = kSpoutWidth;
+		const int outH = kSpoutHeight;
+
+		if (sceneColorTex.width() != static_cast<unsigned>(outW)
+			|| sceneColorTex.height() != static_cast<unsigned>(outH))
+		{
+			updateSceneFBO(outW, outH);
+		}
+
+		if (outW > 0 && outH > 0 && sceneColorTex.id() != 0)
+		{
+			sceneFbo.bind();
+			g.viewport(0, 0, outW, outH);
+			g.clear(0.1);
+			drawScene(g, outW, outH);
+			sceneFbo.unbind();
+
+#ifdef _WIN32
+			if (spoutEnabled && sceneColorTex.id() != 0)
+			{
+				spoutSender.SendTexture(
+					static_cast<GLuint>(sceneColorTex.id()),
+					GL_TEXTURE_2D,
+					static_cast<unsigned int>(outW),
+					static_cast<unsigned int>(outH),
+					true,
+					0);
+			}
+#endif
+		}
 
 		g.viewport(0, 0, fbWidth(), fbHeight());
+		g.clear(0.1);
+
+		if (sceneColorTex.id() != 0)
+		{
+			g.quadViewport(sceneColorTex);
+		}
+
 		imguiDraw();
 	}
 
@@ -504,22 +591,22 @@ struct EoYS : public App
 		ImGui::Text("Toggle panel: H");
 		ImGui::Separator();
 
-		if (!mClipLeaves.empty())
+#ifdef _WIN32
+		ImGui::Text("Spout sender: %s", kSpoutSenderName);
+		ImGui::Text("Spout output: %d x %d", kSpoutWidth, kSpoutHeight);
+		ImGui::Checkbox("Send Spout output", &spoutEnabled);
+		if (spoutSender.IsInitialized())
 		{
-			const ClipConfig &c = mClipLeaves[mClipIndex];
-			ImGui::Text("Auto clip: %c  idx %d / %d  t=%.2fs",
-				c.branch,
-				static_cast<int>(mClipIndex),
-				static_cast<int>(mClipLeaves.size()),
-				static_cast<float>(mClipTime));
+			ImGui::Text(
+				"Spout: %ux%u",
+				spoutSender.GetWidth(),
+				spoutSender.GetHeight());
 		}
-		ImGui::Text("Nav4D pos: (%.2f, %.2f, %.2f, %.2f)",
-			camera4D.pos.x, camera4D.pos.y, camera4D.pos.z, camera4D.pos.w);
-		ImGui::Text("Face -Z: (%.2f, %.2f, %.2f, %.2f)",
-			camera4D.faceDirection.face[2].x,
-			camera4D.faceDirection.face[2].y,
-			camera4D.faceDirection.face[2].z,
-			camera4D.faceDirection.face[2].w);
+		ImGui::Separator();
+#else
+		ImGui::Text("Spout: Windows build only");
+		ImGui::Separator();
+#endif
 
 		ImGui::Checkbox("Show world axes", &showWorldAxes);
 
@@ -550,7 +637,7 @@ struct EoYS : public App
 		{
 			ImGui::Checkbox("Split view", &splitView);
 			ImGui::SliderFloat("Slice w (viewer-local)", &sliceSettings.wPlane, -25.f, 25.f, "%.2f");
-			ImGui::Text("Slice scale: %.1f (fixed)", kSliceScaleFixed);
+			ImGui::SliderFloat("Slice scale", &sliceSettings.sliceScale, 1.f, 60.f, "%.1f");
 			ImGui::Checkbox("Slice solid", &sliceSettings.drawVolume);
 			ImGui::Checkbox("Slice points", &sliceSettings.drawPoints);
 			ImGui::SliderFloat("Slice point size", &sliceSettings.pointSize, 1.f, 10.f, "%.1f");
@@ -805,7 +892,6 @@ struct EoYS : public App
 
 		switch (key)
 		{
-        //X
 		case 'd':
 		case 'D':
 			camera4D.addMoveSpeedLocal(0, kMoveSpeed);
@@ -814,7 +900,6 @@ struct EoYS : public App
 		case 'A':
 			camera4D.addMoveSpeedLocal(0, -kMoveSpeed);
 			return true;
-        // Y
 		case 'e':
 		case 'E':
 			camera4D.addMoveSpeedLocal(1, kMoveSpeed);
@@ -823,7 +908,6 @@ struct EoYS : public App
 		case 'C':
 			camera4D.addMoveSpeedLocal(1, -kMoveSpeed);
 			return true;
-        // Z
 		case 'w':
 		case 'W':
 			camera4D.addMoveSpeedLocal(2, kMoveSpeed);
@@ -832,7 +916,6 @@ struct EoYS : public App
 		case 'X':
 			camera4D.addMoveSpeedLocal(2, -kMoveSpeed);
 			return true;
-        // W
 		case 'r':
 		case 'R':
 			camera4D.addMoveSpeedLocal(3, kMoveSpeed);
@@ -841,57 +924,38 @@ struct EoYS : public App
 		case 'V':
 			camera4D.addMoveSpeedLocal(3, -kMoveSpeed);
 			return true;
-
-        // XY 
-        case 'z':
+		case 'z':
 		case 'Z':
-            resetNavigationInput();
+			resetNavigationInput();
 			camera4D.addRotateSpeedLocal(0, rotSpeedRad);
-			return true;   
+			return true;
 		case 'q':
 		case 'Q':
-            resetNavigationInput();
+			resetNavigationInput();
 			camera4D.addRotateSpeedLocal(0, -rotSpeedRad);
 			return true;
-        // // XZ
-        // case Keyboard::RIGHT:
-		// 	camera4D.addRotateSpeedLocal(1, rotSpeedRad);
-        //     return true;
-		// case Keyboard::LEFT:
-		// 	camera4D.addRotateSpeedLocal(1, -rotSpeedRad);
-		// 	return true;
-        // XW
 		case '1':
-            resetNavigationInput();
+			resetNavigationInput();
 			camera4D.addRotateSpeedLocal(2, rotSpeedRad);
 			return true;
 		case '2':
-            resetNavigationInput();
+			resetNavigationInput();
 			camera4D.addRotateSpeedLocal(2, -rotSpeedRad);
 			return true;
-        // // YZ
-		// case Keyboard::UP:
-		// 	camera4D.addRotateSpeedLocal(3, rotSpeedRad);
-		// 	return true;
-		// case Keyboard::DOWN:
-		// 	camera4D.addRotateSpeedLocal(3, -rotSpeedRad);
-		// 	return true;
-        // YW
 		case '3':
-            resetNavigationInput();
+			resetNavigationInput();
 			camera4D.addRotateSpeedLocal(4, rotSpeedRad);
 			return true;
 		case '4':
-            resetNavigationInput();
+			resetNavigationInput();
 			camera4D.addRotateSpeedLocal(4, -rotSpeedRad);
 			return true;
-        // ZW
 		case '5':
-            resetNavigationInput();
+			resetNavigationInput();
 			camera4D.addRotateSpeedLocal(5, rotSpeedRad);
 			return true;
 		case '6':
-            resetNavigationInput();
+			resetNavigationInput();
 			camera4D.addRotateSpeedLocal(5, -rotSpeedRad);
 			return true;
 		default:
@@ -904,11 +968,9 @@ struct EoYS : public App
 	bool onKeyUp(const Keyboard &k) override
 	{
 		const int key = k.key();
-		const float rotSpeedRad = kRotSpeedDeg * (3.14159265358979f / 180.f);
 
 		switch (key)
 		{
-		//X
 		case 'd':
 		case 'D':
 			camera4D.addMoveSpeedLocal(0, -kMoveSpeed);
@@ -917,7 +979,6 @@ struct EoYS : public App
 		case 'A':
 			camera4D.addMoveSpeedLocal(0, kMoveSpeed);
 			return true;
-        // Y
 		case 'e':
 		case 'E':
 			camera4D.addMoveSpeedLocal(1, -kMoveSpeed);
@@ -926,7 +987,6 @@ struct EoYS : public App
 		case 'C':
 			camera4D.addMoveSpeedLocal(1, kMoveSpeed);
 			return true;
-        // Z
 		case 'w':
 		case 'W':
 			camera4D.addMoveSpeedLocal(2, -kMoveSpeed);
@@ -935,7 +995,6 @@ struct EoYS : public App
 		case 'X':
 			camera4D.addMoveSpeedLocal(2, kMoveSpeed);
 			return true;
-        // W
 		case 'r':
 		case 'R':
 			camera4D.addMoveSpeedLocal(3, -kMoveSpeed);
@@ -944,51 +1003,6 @@ struct EoYS : public App
 		case 'V':
 			camera4D.addMoveSpeedLocal(3, kMoveSpeed);
 			return true;
-
-        // // XY 
-        // case 'z':
-		// case 'Z':
-		// 	camera4D.addRotateSpeedLocal(0, -rotSpeedRad);
-		// 	return true;   
-		// case 'q':
-		// case 'Q':
-		// 	camera4D.addRotateSpeedLocal(0, rotSpeedRad);
-		// 	return true;
-        // // XZ
-        // case Keyboard::RIGHT:
-		// 	camera4D.addRotateSpeedLocal(1, -rotSpeedRad);
-        //     return true;
-		// case Keyboard::LEFT:
-		// 	camera4D.addRotateSpeedLocal(1, rotSpeedRad);
-		// 	return true;
-        // // ZW
-		// case '1':
-		// 	camera4D.addRotateSpeedLocal(2, -rotSpeedRad);
-		// 	return true;
-		// case '2':
-		// 	camera4D.addRotateSpeedLocal(2, rotSpeedRad);
-		// 	return true;
-        // // YZ
-		// case Keyboard::UP:
-		// 	camera4D.addRotateSpeedLocal(3, -rotSpeedRad);
-		// 	return true;
-		// case Keyboard::DOWN:
-		// 	camera4D.addRotateSpeedLocal(3, rotSpeedRad);
-		// 	return true;
-        // // YW
-		// case '3':
-		// 	camera4D.addRotateSpeedLocal(4, -rotSpeedRad);
-		// 	return true;
-		// case '4':
-		// 	camera4D.addRotateSpeedLocal(4, rotSpeedRad);
-		// 	return true;
-        // // ZW
-		// case '5':
-		// 	camera4D.addRotateSpeedLocal(5, -rotSpeedRad);
-		// 	return true;
-		// case '6':
-		// 	camera4D.addRotateSpeedLocal(5, rotSpeedRad);
-		// 	return true;
 		default:
 			break;
 		}
@@ -998,13 +1012,16 @@ struct EoYS : public App
 
 	void onExit() override
 	{
+#ifdef _WIN32
+		spoutSender.ReleaseSender();
+#endif
 		imguiShutdown();
 	}
 };
 
 int main()
 {
-	EoYS app;
+	EoYSspout app;
 	app.fps(60);
 	app.start();
 	return 0;
