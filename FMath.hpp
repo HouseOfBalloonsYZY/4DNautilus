@@ -30,6 +30,25 @@ inline float clamp(float v, float maxAbs)
     return std::max(-maxAbs, std::min(maxAbs, v));
 }
 
+// Orthonormalize a spanning pair for a 2-plane (Gram-Schmidt).
+// Returns false if u is near-zero or u,v are near-parallel.
+inline bool orthonormalizePlane(Vec4f &u, Vec4f &v)
+{
+    const float eps = 1e-7f;
+    if (u.mag() < eps)
+    {
+        return false;
+    }
+    u = u.normalized();
+    v = v - u * v.dot(u);
+    if (v.mag() < eps)
+    {
+        return false;
+    }
+    v = v.normalized();
+    return true;
+}
+
 inline Vec4f clampVec4(const Vec4f &v, float maxAbs)
 {
     Vec4f result = v;
@@ -108,19 +127,18 @@ private:
      *  - eps: if |axis| is nearly zero we skip division and return identity. */
     static Quatf quatFromImaginary(float vx, float vy, float vz)
     {
-        const float eps = 1e-7f; // super small non-zero threshold for negligible axis
+        const float eps = 1e-7f;
         Vec3f axis(vx, vy, vz);
-
-        // if this is tiny, return identity
         float theta = axis.mag();
         if (theta < eps)
         {
             return Quatf::identity();
         }
 
-        // otherwise, return the quaternion
-        Quatf q;
-        q.fromAxisAngle(theta, axis / theta);
+        const float inv = 1.f / theta;
+        const float s = std::sin(theta);
+        const float c = std::cos(theta);
+        Quatf q(c, axis.x * inv * s, axis.y * inv * s, axis.z * inv * s);
         q.normalize();
         return q;
     }
@@ -272,46 +290,57 @@ public:
         return Rotation4D(qL, qR);
     }
 
-    // --- Wedge-product / SU(2) construction (see quaternion4DRotation.md) ---
-
-    /** Rotation in the plane spanned by two 4D vectors u, v by angle (radians).
-     *  Wedge product gives the 6 rates, then fromRates. u,v need not be unit. */
+    /** Simple rotation in the plane span(u,v) by angleRad (geometric radians).
+     *  Orthonormalizes u,v (Gram-Schmidt), builds unit wedge rates at half-angle
+     *  (sandwich uses q=cos(α)+… with geometric angle 2α), then fromRates. */
     // Plane-rate order convention (project-wide):
     // (rXY, rXZ, rXW, rYZ, rYW, rZW)
     static Rotation4D fromPlane(const Vec4f &u, const Vec4f &v, float angleRad)
     {
-        Vec4f u_normalized = u.normalized();
-        Vec4f v_normalized = v.normalized();
-        float rXY = (u_normalized.x * v_normalized.y - u_normalized.y * v_normalized.x) * angleRad;
+        Vec4f uOrtho = u;
+        Vec4f vOrtho = v;
+        if (!orthonormalizePlane(uOrtho, vOrtho))
+        {
+            return Rotation4D::identity();
+        }
+
+        // Half-angle: |v_L| must be geometricAngle/2 for correct sandwich magnitude.
+        const float half = angleRad * 0.5f;
+        float rXY = (uOrtho.x * vOrtho.y - uOrtho.y * vOrtho.x) * half;
         // Note: rXZ = -rZX (antisymmetry of the wedge / bivector components).
-        float rXZ = (u_normalized.x * v_normalized.z - u_normalized.z * v_normalized.x) * angleRad;
-        float rXW = (u_normalized.x * v_normalized.w - u_normalized.w * v_normalized.x) * angleRad;
-        float rYZ = (u_normalized.y * v_normalized.z - u_normalized.z * v_normalized.y) * angleRad;
-        float rYW = (u_normalized.y * v_normalized.w - u_normalized.w * v_normalized.y) * angleRad;
-        float rZW = (u_normalized.z * v_normalized.w - u_normalized.w * v_normalized.z) * angleRad;
+        float rXZ = (uOrtho.x * vOrtho.z - uOrtho.z * vOrtho.x) * half;
+        float rXW = (uOrtho.x * vOrtho.w - uOrtho.w * vOrtho.x) * half;
+        float rYZ = (uOrtho.y * vOrtho.z - uOrtho.z * vOrtho.y) * half;
+        float rYW = (uOrtho.y * vOrtho.w - uOrtho.w * vOrtho.y) * half;
+        float rZW = (uOrtho.z * vOrtho.w - uOrtho.w * vOrtho.z) * half;
         return fromRates(rXY, rXZ, rXW, rYZ, rYW, rZW);
     }
 
-    /** Double rotation: two orthogonal planes with angles. Rates add linearly. */
+    /** Double rotation in two planes (ideally orthogonal). Same half-angle + Gram-Schmidt
+     *  per plane as fromPlane; rates add linearly. */
     static Rotation4D fromPlanes(const Vec4f &u1, const Vec4f &v1, float angle1Rad,
                                  const Vec4f &u2, const Vec4f &v2, float angle2Rad)
     {
-        Vec4f u1_normalized = u1.normalized();
-        Vec4f v1_normalized = v1.normalized();
-        Vec4f u2_normalized = u2.normalized();
-        Vec4f v2_normalized = v2.normalized();
-        float rXY = (u1_normalized.x * v1_normalized.y - u1_normalized.y * v1_normalized.x) * angle1Rad +
-                    (u2_normalized.x * v2_normalized.y - u2_normalized.y * v2_normalized.x) * angle2Rad;
-        float rXZ = (u1_normalized.x * v1_normalized.z - u1_normalized.z * v1_normalized.x) * angle1Rad +
-                    (u2_normalized.x * v2_normalized.z - u2_normalized.z * v2_normalized.x) * angle2Rad;
-        float rXW = (u1_normalized.x * v1_normalized.w - u1_normalized.w * v1_normalized.x) * angle1Rad +
-                    (u2_normalized.x * v2_normalized.w - u2_normalized.w * v2_normalized.x) * angle2Rad;
-        float rYZ = (u1_normalized.y * v1_normalized.z - u1_normalized.z * v1_normalized.y) * angle1Rad +
-                    (u2_normalized.y * v2_normalized.z - u2_normalized.z * v2_normalized.y) * angle2Rad;
-        float rYW = (u1_normalized.y * v1_normalized.w - u1_normalized.w * v1_normalized.y) * angle1Rad +
-                    (u2_normalized.y * v2_normalized.w - u2_normalized.w * v2_normalized.y) * angle2Rad;
-        float rZW = (u1_normalized.z * v1_normalized.w - u1_normalized.w * v1_normalized.z) * angle1Rad +
-                    (u2_normalized.z * v2_normalized.w - u2_normalized.w * v2_normalized.z) * angle2Rad;
+        Vec4f a1 = u1;
+        Vec4f b1 = v1;
+        Vec4f a2 = u2;
+        Vec4f b2 = v2;
+        const bool ok1 = orthonormalizePlane(a1, b1);
+        const bool ok2 = orthonormalizePlane(a2, b2);
+        if (!ok1 && !ok2)
+        {
+            return Rotation4D::identity();
+        }
+
+        const float h1 = ok1 ? (angle1Rad * 0.5f) : 0.f;
+        const float h2 = ok2 ? (angle2Rad * 0.5f) : 0.f;
+
+        float rXY = (a1.x * b1.y - a1.y * b1.x) * h1 + (a2.x * b2.y - a2.y * b2.x) * h2;
+        float rXZ = (a1.x * b1.z - a1.z * b1.x) * h1 + (a2.x * b2.z - a2.z * b2.x) * h2;
+        float rXW = (a1.x * b1.w - a1.w * b1.x) * h1 + (a2.x * b2.w - a2.w * b2.x) * h2;
+        float rYZ = (a1.y * b1.z - a1.z * b1.y) * h1 + (a2.y * b2.z - a2.z * b2.y) * h2;
+        float rYW = (a1.y * b1.w - a1.w * b1.y) * h1 + (a2.y * b2.w - a2.w * b2.y) * h2;
+        float rZW = (a1.z * b1.w - a1.w * b1.z) * h1 + (a2.z * b2.w - a2.w * b2.z) * h2;
         return fromRates(rXY, rXZ, rXW, rYZ, rYW, rZW);
     }
 
