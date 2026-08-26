@@ -49,6 +49,131 @@ inline bool orthonormalizePlane(Vec4f &u, Vec4f &v)
     return true;
 }
 
+// Complete (u,v) to a positively oriented ONB (u,v,n1,n2).
+inline bool completePlaneBasis(Vec4f &u, Vec4f &v, Vec4f &n1, Vec4f &n2)
+{
+    if (!orthonormalizePlane(u, v))
+    {
+        return false;
+    }
+
+    const Vec4f candidates[4] = {
+        Vec4f(1.f, 0.f, 0.f, 0.f),
+        Vec4f(0.f, 1.f, 0.f, 0.f),
+        Vec4f(0.f, 0.f, 1.f, 0.f),
+        Vec4f(0.f, 0.f, 0.f, 1.f)};
+
+    auto makeOrtho = [&](const Vec4f *basis, int basisCount, Vec4f &out) -> bool
+    {
+        for (const Vec4f &e : candidates)
+        {
+            Vec4f n = e;
+            for (int i = 0; i < basisCount; ++i)
+            {
+                n = n - basis[i] * n.dot(basis[i]);
+            }
+            if (n.mag() > 1e-7f)
+            {
+                out = n.normalized();
+                return true;
+            }
+        }
+        return false;
+    };
+
+    Vec4f basis2[2] = {u, v};
+    if (!makeOrtho(basis2, 2, n1))
+    {
+        return false;
+    }
+    Vec4f basis3[3] = {u, v, n1};
+    if (!makeOrtho(basis3, 3, n2))
+    {
+        return false;
+    }
+
+    // det[u v n1 n2] via scalar quadruple product; flip n2 if negatively oriented.
+    // For columns c0..c3, det = ε_ijkl c0_i c1_j c2_k c3_l.
+    float det = 0.f;
+    for (int i = 0; i < 4; ++i)
+    {
+        for (int j = 0; j < 4; ++j)
+        {
+            if (j == i)
+            {
+                continue;
+            }
+            for (int k = 0; k < 4; ++k)
+            {
+                if (k == i || k == j)
+                {
+                    continue;
+                }
+                for (int l = 0; l < 4; ++l)
+                {
+                    if (l == i || l == j || l == k)
+                    {
+                        continue;
+                    }
+                    // parity of permutation (i,j,k,l)
+                    int p[4] = {i, j, k, l};
+                    int invs = 0;
+                    for (int a = 0; a < 4; ++a)
+                    {
+                        for (int b = a + 1; b < 4; ++b)
+                        {
+                            if (p[a] > p[b])
+                            {
+                                ++invs;
+                            }
+                        }
+                    }
+                    const float sign = (invs % 2 == 0) ? 1.f : -1.f;
+                    det += sign * u[i] * v[j] * n1[k] * n2[l];
+                }
+            }
+        }
+    }
+    if (det < 0.f)
+    {
+        n2 = -n2;
+    }
+    return true;
+}
+
+// Unit quat with q * a * conj(q) = b for unit 3-vectors a,b (pure imaginaries).
+inline Quatf quatAlignVec3(const Vec3f &aIn, const Vec3f &bIn)
+{
+    Vec3f a = aIn.normalized();
+    Vec3f b = bIn.normalized();
+    const float d = a.dot(b);
+    if (d < -1.f + 1e-6f)
+    {
+        Vec3f axis = (std::fabs(a.x) < 0.9f) ? a.cross(Vec3f(1.f, 0.f, 0.f))
+                                             : a.cross(Vec3f(0.f, 1.f, 0.f));
+        axis = axis.normalized();
+        return Quatf(0.f, axis.x, axis.y, axis.z);
+    }
+    const Vec3f c = a.cross(b);
+    Quatf q(1.f + d, c.x, c.y, c.z);
+    q.normalize();
+    return q;
+}
+
+// q such that sandwich maps i→iTo, j→jTo in imaginary 3-space.
+inline Quatf quatAlignImagFrame(const Vec3f &iTo, const Vec3f &jTo)
+{
+    const Quatf q1 = quatAlignVec3(Vec3f(1.f, 0.f, 0.f), iTo);
+    // j' = q1 * j * conj(q1)
+    const Quatf jPure(0.f, 0.f, 1.f, 0.f);
+    const Quatf jpQ = q1.multiply(jPure).multiply(q1.conj());
+    const Vec3f jp(jpQ.x, jpQ.y, jpQ.z);
+    const Quatf q2 = quatAlignVec3(jp, jTo);
+    Quatf q = q2.multiply(q1);
+    q.normalize();
+    return q;
+}
+
 inline Vec4f clampVec4(const Vec4f &v, float maxAbs)
 {
     Vec4f result = v;
@@ -290,58 +415,52 @@ public:
         return Rotation4D(qL, qR);
     }
 
-    /** Simple rotation in the plane span(u,v) by angleRad (geometric radians).
-     *  Orthonormalizes u,v (Gram-Schmidt), builds unit wedge rates at half-angle
-     *  (sandwich uses q=cos(α)+… with geometric angle 2α), then fromRates. */
-    // Plane-rate order convention (project-wide):
-    // (rXY, rXZ, rXW, rYZ, rYW, rZW)
-    static Rotation4D fromPlane(const Vec4f &u, const Vec4f &v, float angleRad)
+    /** Simple rotation in plane span(u,v) by angleRad (geometric radians).
+     *  Built as M ∘ L_xy ∘ M^{-1}: L_xy is the known-good cardinal XY spin;
+     *  M maps (ex,ey) → orthonormal (u,v). Matches Rodrigues (complement fixed).
+     *  (Wedge→fromRates is NOT used here — it fails for tilted planes.) */
+    static Rotation4D fromPlane(const Vec4f &uIn, const Vec4f &vIn, float angleRad)
     {
-        Vec4f uOrtho = u;
-        Vec4f vOrtho = v;
-        if (!orthonormalizePlane(uOrtho, vOrtho))
+        Vec4f u = uIn;
+        Vec4f v = vIn;
+        Vec4f n1;
+        Vec4f n2;
+        if (!completePlaneBasis(u, v, n1, n2))
         {
             return Rotation4D::identity();
         }
 
-        // Half-angle: |v_L| must be geometricAngle/2 for correct sandwich magnitude.
-        const float half = angleRad * 0.5f;
-        float rXY = (uOrtho.x * vOrtho.y - uOrtho.y * vOrtho.x) * half;
-        // Note: rXZ = -rZX (antisymmetry of the wedge / bivector components).
-        float rXZ = (uOrtho.x * vOrtho.z - uOrtho.z * vOrtho.x) * half;
-        float rXW = (uOrtho.x * vOrtho.w - uOrtho.w * vOrtho.x) * half;
-        float rYZ = (uOrtho.y * vOrtho.z - uOrtho.z * vOrtho.y) * half;
-        float rYW = (uOrtho.y * vOrtho.w - uOrtho.w * vOrtho.y) * half;
-        float rZW = (uOrtho.z * vOrtho.w - uOrtho.w * vOrtho.z) * half;
-        return fromRates(rXY, rXZ, rXW, rYZ, rYW, rZW);
+        // M: apply sends ex,ey,ez,ew → u,v,n1,n2
+        const Quatf U = vec4ToQuat(u);
+        const Quatf V = vec4ToQuat(v);
+        const Quatf One = vec4ToQuat(n2); // ew → scalar 1
+        const Quatf ti = U.multiply(One.conj());
+        const Quatf tj = V.multiply(One.conj());
+        const Quatf qLm = quatAlignImagFrame(Vec3f(ti.x, ti.y, ti.z), Vec3f(tj.x, tj.y, tj.z));
+        Quatf qRm = qLm.conj().multiply(One);
+        qRm.normalize();
+        const Rotation4D M(qLm, qRm);
+
+        // L: simple XY by angleRad (qR = conj(qL) → fixes z,w)
+        const float ha = angleRad * 0.5f;
+        const float c = std::cos(ha);
+        const float s = std::sin(ha);
+        const Rotation4D L(Quatf(c, 0.f, 0.f, s), Quatf(c, 0.f, 0.f, -s));
+
+        // W = M ∘ L ∘ M^{-1}
+        const Rotation4D Mi = M.inverse();
+        const Rotation4D LMi(L.getQL().multiply(Mi.getQL()), Mi.getQR().multiply(L.getQR()));
+        return Rotation4D(M.getQL().multiply(LMi.getQL()), LMi.getQR().multiply(M.getQR()));
     }
 
-    /** Double rotation in two planes (ideally orthogonal). Same half-angle + Gram-Schmidt
-     *  per plane as fromPlane; rates add linearly. */
+    /** Double rotation: compose two simple fromPlane spins (exact when planes are orthogonal). */
     static Rotation4D fromPlanes(const Vec4f &u1, const Vec4f &v1, float angle1Rad,
                                  const Vec4f &u2, const Vec4f &v2, float angle2Rad)
     {
-        Vec4f a1 = u1;
-        Vec4f b1 = v1;
-        Vec4f a2 = u2;
-        Vec4f b2 = v2;
-        const bool ok1 = orthonormalizePlane(a1, b1);
-        const bool ok2 = orthonormalizePlane(a2, b2);
-        if (!ok1 && !ok2)
-        {
-            return Rotation4D::identity();
-        }
-
-        const float h1 = ok1 ? (angle1Rad * 0.5f) : 0.f;
-        const float h2 = ok2 ? (angle2Rad * 0.5f) : 0.f;
-
-        float rXY = (a1.x * b1.y - a1.y * b1.x) * h1 + (a2.x * b2.y - a2.y * b2.x) * h2;
-        float rXZ = (a1.x * b1.z - a1.z * b1.x) * h1 + (a2.x * b2.z - a2.z * b2.x) * h2;
-        float rXW = (a1.x * b1.w - a1.w * b1.x) * h1 + (a2.x * b2.w - a2.w * b2.x) * h2;
-        float rYZ = (a1.y * b1.z - a1.z * b1.y) * h1 + (a2.y * b2.z - a2.z * b2.y) * h2;
-        float rYW = (a1.y * b1.w - a1.w * b1.y) * h1 + (a2.y * b2.w - a2.w * b2.y) * h2;
-        float rZW = (a1.z * b1.w - a1.w * b1.z) * h1 + (a2.z * b2.w - a2.w * b2.z) * h2;
-        return fromRates(rXY, rXZ, rXW, rYZ, rYW, rZW);
+        const Rotation4D r1 = fromPlane(u1, v1, angle1Rad);
+        const Rotation4D r2 = fromPlane(u2, v2, angle2Rad);
+        // r1 ∘ r2
+        return Rotation4D(r1.getQL().multiply(r2.getQL()), r2.getQR().multiply(r1.getQR()));
     }
 
     // this has to be implemented outside becasue FaceDirection hasn't been defined yet at this point in the file
