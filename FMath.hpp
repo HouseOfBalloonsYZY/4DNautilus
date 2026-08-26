@@ -466,12 +466,28 @@ public:
     // this has to be implemented outside becasue FaceDirection hasn't been defined yet at this point in the file
     static Rotation4D fromLocalPlane(const FaceDirection &face, int axis1, int axis2, float angleRad);
 
+    /// Cardinal simple spin in the body axis convention (+X,+Y,-Z,-W), same signs as default FaceDirection.
+    /// Used for body-local compose R ← R ∘ L (no face-dependent M).
+    static Rotation4D fromBodyPlane(int axis1, int axis2, float angleRad);
+
     /// Accumulate this frame's rotation after the current state (Plan A / face-plane deltas).
     /// R_total = delta ∘ R_old  →  qL = qL_delta·qL_old,  qR = qR_old·qR_delta
     void append(const Rotation4D &delta)
     {
         qL = delta.qL.multiply(qL);
         qR = qR.multiply(delta.qR);
+
+        qL.normalize();
+        qR.normalize();
+    }
+
+    /// Body-local compose: R ← R ∘ L
+    /// (apply L in the object's current body frame, then existing R).
+    /// qL' = qL qL_L,  qR' = qR_L qR
+    void composeRight(const Rotation4D &L)
+    {
+        qL = qL.multiply(L.qL);
+        qR = L.qR.multiply(qR);
 
         qL.normalize();
         qR.normalize();
@@ -539,20 +555,21 @@ inline Rotation4D Rotation4D::fromLocalPlane(const FaceDirection &face, int axis
         {
             return Rotation4D::fromPlane(face.face[axis1], face.face[axis2], angleRad);
         }
-        else
-        {
-            return Rotation4D::fromPlane(face.face[axis1], -face.face[axis2], angleRad);
-        }
+        return Rotation4D::fromPlane(face.face[axis1], -face.face[axis2], angleRad);
     }
-    else if (axis1 == 2 || axis1 == 3)
+
+    // axis1 is 2 or 3
+    if (axis2 == 0 || axis2 == 1)
     {
-        if (axis2 == 0 || axis2 == 1)
-        {
-            return Rotation4D::fromPlane(-face.face[axis1], face.face[axis2], angleRad);
-        }
-        else
-        {
-            return Rotation4D::fromPlane(-face.face[axis1], -face.face[axis2], angleRad);
-        }
+        return Rotation4D::fromPlane(-face.face[axis1], face.face[axis2], angleRad);
     }
+    return Rotation4D::fromPlane(-face.face[axis1], -face.face[axis2], angleRad);
+}
+
+inline Rotation4D Rotation4D::fromBodyPlane(int axis1, int axis2, float angleRad)
+{
+    // Fixed body axes matching default FaceDirection (+X,+Y,-Z,-W).
+    // fromPlane on these is pose-independent → no M singularity while navigating.
+    static const FaceDirection kBodyAxes{};
+    return fromLocalPlane(kBodyAxes, axis1, axis2, angleRad);
 }

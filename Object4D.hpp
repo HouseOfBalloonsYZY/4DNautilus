@@ -44,6 +44,7 @@ protected:
 
     void setRotationState(const Rotation4D &r) { rotationState = r; }
     void appendRotationState(const Rotation4D &delta) { rotationState.append(delta); }
+    void composeRotationLocal(const Rotation4D &L) { rotationState.composeRight(L); }
 
     // ------------------------------------------------------------
     // hidden interfaces ------------------------------------------
@@ -80,11 +81,10 @@ protected:
 
     void rotateByLocal(int axis1, int axis2, float angleDeg)
     {
-        syncFace();
         float rad = degreesToRad(angleDeg);
-
-        appendRotationState(Rotation4D::fromLocalPlane(faceDirection, axis1, axis2, rad));
-
+        // Body-local: R ← R ∘ L (cardinal L, no face-dependent M).
+        composeRotationLocal(Rotation4D::fromBodyPlane(axis1, axis2, rad));
+        syncFace();
         onRotationChanged();
     }
 
@@ -107,7 +107,6 @@ protected:
 
     void rotateByLocal()
     {
-        syncFace();
         for (int i = 0; i < 6; ++i)
         {
             float rad = mRotateByLocal[i];
@@ -115,11 +114,11 @@ protected:
             {
                 continue;
             }
-            appendRotationState(Rotation4D::fromLocalPlane(faceDirection, kPlane6[i].first, kPlane6[i].second, rad));
+            composeRotationLocal(Rotation4D::fromBodyPlane(kPlane6[i].first, kPlane6[i].second, rad));
         }
 
         mRotateByLocal.fill(0.f);
-
+        syncFace();
         onRotationChanged();
     }
 
@@ -174,18 +173,19 @@ protected:
             mRotateStepLocal[i] += (mRotateSpeedLocal[i] * dt - mRotateStepLocal[i]) * amt;
         }
 
-        syncFace();
-
         const float eps = 1e-7f; // super small non-zero threshold for negligible angle
 
         for (int i = 0; i < 6; ++i)
         {
             if (mRotateStepLocal[i] > eps || mRotateStepLocal[i] < -eps)
             {
-                appendRotationState(Rotation4D::fromLocalPlane(faceDirection, kPlane6[i].first, kPlane6[i].second, mRotateStepLocal[i]));
+                // Body-local: R ← R ∘ L_cardinal (no fromLocalPlane / face M).
+                composeRotationLocal(Rotation4D::fromBodyPlane(
+                    kPlane6[i].first, kPlane6[i].second, mRotateStepLocal[i]));
             }
         }
 
+        syncFace();
         onRotationChanged();
     }
 
