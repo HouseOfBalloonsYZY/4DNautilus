@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Nav4D.hpp"
+#include "Camera4D.hpp"
 
 #include "al/graphics/al_Graphics.hpp"
 #include "al/graphics/al_Mesh.hpp"
@@ -115,20 +115,20 @@ public:
 	}
 
 	/// World 4D → viewer-local → projected 3D (culled when behind or kata).
-	bool tryProjectWorld(const Nav4D &viewer, const Vec4f &world, Vec3f &out) const
+	bool tryProjectWorld(const Camera4D &viewer, const Vec4f &world, Vec3f &out) const
 	{
 		return tryProjectLocal(viewer.toLocal(world), out);
 	}
 
 	/// World 4D → projected 3D; only defined when tryProjectWorld succeeds.
-	Vec3f projectWorld(const Nav4D &viewer, const Vec4f &world) const
+	Vec3f projectWorld(const Camera4D &viewer, const Vec4f &world) const
 	{
 		return projectLocal(viewer.toLocal(world));
 	}
 
 	/// Batch: world vertices → projected 3D (culled vertices omitted; order not index-stable).
 	std::vector<Vec3f> projectWorldVertices(
-		const Nav4D &viewer,
+		const Camera4D &viewer,
 		const std::vector<Vec4f> &vertsWorld) const
 	{
 		std::vector<Vec3f> out;
@@ -147,7 +147,7 @@ public:
 	/// Indexed line soup in world 4D → projected line mesh (edges with culled endpoints skipped).
     // mesh drawn
 	al::Mesh buildProjectedLineMesh(
-		const Nav4D &viewer,
+		const Camera4D &viewer,
 		const std::vector<Vec4f> &vertsWorld,
 		const std::vector<std::pair<int, int>> &edges,
 		bool colorByLocalW = true) const
@@ -192,7 +192,7 @@ public:
 
 	/// Object-local vertices + pose → projected line mesh.
 	al::Mesh buildProjectedLineMeshFromObjectLocal(
-		const Nav4D &viewer,
+		const Camera4D &viewer,
 		const Object4D &object,
 		const std::vector<Vec4f> &vertsLocal,
 		const std::vector<std::pair<int, int>> &edges,
@@ -217,7 +217,7 @@ public:
 		g.draw(lines);
 	}
 
-	void drawWorldAxes(al::Graphics &g, const Nav4D &viewer, float length = 4.f) const
+	void drawWorldAxes(al::Graphics &g, const Camera4D &viewer, float length = 4.f) const
 	{
 		al::Mesh m;
 		m.primitive(al::Mesh::LINES);

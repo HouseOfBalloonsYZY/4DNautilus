@@ -6,7 +6,7 @@
 #include "4DNautilus/4DNautilusHypervolume.hpp"
 #include "4DNautilus/FProjectorPlane.hpp"
 #include "4DNautilus/FSlicer.hpp"
-#include "4DNautilus/Nav4D.hpp"
+#include "4DNautilus/Camera4D.hpp"
 #include "4DNautilus/Nautilus4D.hpp"
 
 #ifdef _WIN32
@@ -52,7 +52,7 @@ struct EoYSspout : public App
 	static constexpr int kSpoutWidth = 10185;
 	static constexpr int kSpoutHeight = 2160;
 
-	Nav4D camera4D;
+	Camera4D camera4D;
 	Nautilus4D nautilus;
 	NautilusHypervolume4D hypervolume;
 

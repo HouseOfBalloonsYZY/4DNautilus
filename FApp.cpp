@@ -5,7 +5,7 @@
 #include "4DNautilusHypervolume.hpp"
 #include "FProjectorPlane.hpp"
 #include "FSlicer.hpp"
-#include "Nav4D.hpp"
+#include "Camera4D.hpp"
 #include "Nautilus4D.hpp"
 
 #include <array>
@@ -41,7 +41,7 @@ al::Color nautilusGradientColor(float t)
 
 struct FourDApp : public App
 {
-	Nav4D camera4D;
+	Camera4D camera4D;
     //std::vector<Object4D> objects4D; // for potential future use with multiple objects, but currently just one Nautilus4D
 	Nautilus4D nautilus;
 	NautilusHypervolume4D hypervolume;

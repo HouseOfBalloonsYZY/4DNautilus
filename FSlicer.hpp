@@ -102,7 +102,7 @@ public:
 
 	void add1Edge(int a, int b) { mEdges1.emplace_back(a, b); }
 
-	Result slice(const Nav4D &viewer) const
+	Result slice(const Camera4D &viewer) const
 	{
 		Result out;
 		out.volume.primitive(al::Mesh::TRIANGLES);
@@ -655,7 +655,7 @@ struct HyperSliceResult
 };
 
 inline SliceResult sliceQuadsViewerLocal(
-	const Nav4D &viewer,
+	const Camera4D &viewer,
 	const std::vector<Vec4f> &vertsWorld,
 	const std::vector<std::array<int, 4>> &quads,
 	const SliceSettings &settings)
@@ -675,7 +675,7 @@ inline SliceResult sliceQuadsViewerLocal(
 }
 
 inline HyperSliceResult slice4SimplicesViewerLocal(
-	const Nav4D &viewer,
+	const Camera4D &viewer,
 	const std::vector<Vec4f> &vertsWorld,
 	const std::vector<std::array<int, 5>> &simplices,
 	const HyperSliceSettings &settings)

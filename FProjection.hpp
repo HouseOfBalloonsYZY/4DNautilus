@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Nav4D.hpp"
+#include "Camera4D.hpp"
 #include "FProjectorPlane.hpp"
 
 #include "al/graphics/al_Graphics.hpp"
@@ -119,14 +119,14 @@ public:
 	}
 
 	/// World 4D → viewer-local → projected 3D.
-	Vec3f projectWorld(const Nav4D &viewer, const Vec4f &world) const
+	Vec3f projectWorld(const Camera4D &viewer, const Vec4f &world) const
 	{
 		return projectLocal(viewer.toLocal(world));
 	}
 
 	/// Batch: world vertices → projected 3D (same order as input).
 	std::vector<Vec3f> projectWorldVertices(
-		const Nav4D &viewer,
+		const Camera4D &viewer,
 		const std::vector<Vec4f> &vertsWorld) const
 	{
 		std::vector<Vec3f> out;
@@ -140,7 +140,7 @@ public:
 
 	/// Indexed line soup in world 4D → projected line mesh data.
 	al::Mesh buildProjectedLineMesh(
-		const Nav4D &viewer,
+		const Camera4D &viewer,
 		const std::vector<Vec4f> &vertsWorld,
 		const std::vector<std::pair<int, int>> &edges,
 		bool colorByLocalW = true) const
@@ -179,7 +179,7 @@ public:
 
 	/// Object-local vertices + pose → projected line mesh.
 	al::Mesh buildProjectedLineMeshFromObjectLocal(
-		const Nav4D &viewer,
+		const Camera4D &viewer,
 		const Object4D &object,
 		const std::vector<Vec4f> &vertsLocal,
 		const std::vector<std::pair<int, int>> &edges,
@@ -204,7 +204,7 @@ public:
 		g.draw(lines);
 	}
 
-	void drawWorldAxes(al::Graphics &g, const Nav4D &viewer, float length = 4.f) const
+	void drawWorldAxes(al::Graphics &g, const Camera4D &viewer, float length = 4.f) const
 	{
 		al::Mesh m;
 		m.primitive(al::Mesh::LINES);

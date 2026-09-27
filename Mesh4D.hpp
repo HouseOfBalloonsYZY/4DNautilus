@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Nav4D.hpp"
+#include "Camera4D.hpp"
 #include "Object4D.hpp"
 
 #include <array>
@@ -156,7 +156,7 @@ public:
 	}
 
 	/// Viewer-local 4D from world positions. Call each frame from FApp after Nav4D moves.
-	void updateNav4D(const Nav4D &nav)
+	void updateNav4D(const Camera4D &nav)
 	{
 		if (verticesWorld.size() != vertices.size())
 		{
@@ -174,7 +174,7 @@ public:
 	}
 
 	/// Full localization pass: world from pose, then Nav4D capture.
-	void updateNav4DFromPose(const Nav4D &nav)
+	void updateNav4DFromPose(const Camera4D &nav)
 	{
 		updateWorld();
 		updateNav4D(nav);
