@@ -44,7 +44,7 @@ protected:
 
     void setRotationState(const Rotation4D &r) { rotationState = r; }
     void appendRotationState(const Rotation4D &delta) { rotationState.append(delta); }
-    void composeRotationLocal(const Rotation4D &L) { rotationState.composeRight(L); }
+    void prependRotationState(const Rotation4D &delta) { rotationState.prepend(delta); }
 
     // ------------------------------------------------------------
     // hidden interfaces ------------------------------------------
@@ -83,7 +83,7 @@ protected:
     {
         float rad = degreesToRad(angleDeg);
         // Body-local: R ← R ∘ L (cardinal L, no face-dependent M).
-        composeRotationLocal(Rotation4D::fromBodyPlane(axis1, axis2, rad));
+        prependRotationState(Rotation4D::fromLocalPlane(axis1, axis2, rad));
         syncFace();
         onRotationChanged();
     }
@@ -114,7 +114,7 @@ protected:
             {
                 continue;
             }
-            composeRotationLocal(Rotation4D::fromBodyPlane(kPlane6[i].first, kPlane6[i].second, rad));
+            prependRotationState(Rotation4D::fromLocalPlane(kPlane6[i].first, kPlane6[i].second, rad));
         }
 
         mRotateByLocal.fill(0.f);
@@ -179,8 +179,8 @@ protected:
         {
             if (mRotateStepLocal[i] > eps || mRotateStepLocal[i] < -eps)
             {
-                // Body-local: R ← R ∘ L_cardinal (no fromLocalPlane / face M).
-                composeRotationLocal(Rotation4D::fromBodyPlane(
+                // Body-local: R ← R ∘ L via prepend.
+                prependRotationState(Rotation4D::fromLocalPlane(
                     kPlane6[i].first, kPlane6[i].second, mRotateStepLocal[i]));
             }
         }

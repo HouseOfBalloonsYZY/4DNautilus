@@ -166,13 +166,11 @@ struct EoYSspout : public App
 			{{0.1f, 0.1f, 10.f}},
 		}};
 
-		static const FaceDirection kViewerHomeFace{};
-
 		for (int face = 0; face < 2; ++face)
 		{
-			// Viewer-local XZ yaw (face basis at identity home); sign -> left/right clips.
+			// Viewer-local XZ yaw on the identity body chart; sign -> left/right clips.
 			const float angle = (face == 0) ? (-3.14159265358979f * 0.5f) : (3.14159265358979f * 0.5f);
-			const Rotation4D xz = Rotation4D::fromLocalPlane(kViewerHomeFace, 0, 2, angle);
+			const Rotation4D xz = Rotation4D::fromLocalPlane(0, 2, angle);
 
 			for (const auto &m : aMultipliers)
 			{
