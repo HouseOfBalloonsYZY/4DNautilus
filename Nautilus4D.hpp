@@ -1,413 +1,367 @@
 #pragma once
 
-#include "Object4D.hpp"
-
+#include "Mesh4D.hpp"
 #include "al/io/al_Imgui.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
-#include <limits>
 #include <vector>
 
 using namespace al;
 
-// ----------------------------------------------------------------------------
-// 4D Nautilus / Spiral Shell
-// Translation of Processing `FourDSpiralShell.pde` geometry into Allolib.
-//
-// Geometry model:
-// - For each ring parameter t:
-//   - center(t) = 4D logarithmic spiral point
-//   - tangent = normalize(center(t + delta) - center(t))
-//   - build two orthonormal vectors (n1, n2) orthogonal to tangent
-//   - extrude a growing "tube" hyper-circle around center(t) in the span(n1,n2)
-// ----------------------------------------------------------------------------
-class Nautilus4D : public Object4D
+// 4D nautilus as a soft-cell chamber along the logarithmic spiral.
+// Geometry is written only into Mesh4D::verticesGenerated.
+// Cross-section: 3D soft cell (smooth wall, two pinched tips), after
+// Domokos et al., https://www.nature.com/articles/d41586-024-03099-6
+class Nautilus4D
 {
-private:
-    std::vector<Vec4f> vertices_;   // local (object) space
-    std::vector<float> hyperDists_; // |v| in 4D, based on local vertices (no translation)
+	float GR_{(1.f + std::sqrt(5.f)) / 2.f};
+	float E_{2.718281828f};
+	float PI_{3.14159265358979323846f};
 
-    // Processing defaults: tSteps=3000, vSteps=24
-    int tSteps_{3000};
-    int vSteps_{24};
+	float m1_{1.f};
+	float m2_{1.f};
+	float m3_{1.f};
 
-    // Path constants
-    float GR_{(1.0f + std::sqrt(5.0f)) / 2.0f};
-    float E_{2.718281828f};
-    float PI_{3.14159265358979323846f};
+	float a_{0.05f};
+	float b_{0.06f};
+	float tubeGrow_{0.06f};
+	float tubeScale_{0.6f};
+	float maxT_{90.f};
+	float deltaTangent_{0.01f};
 
-    // Dynamic multipliers (user-controlled)
-    float m1_{1.0f};
-    float m2_{1.0f};
-    float m3_{1.0f};
+	bool selectiveDisplay_{true};
+	int startRing_{0};
+	int visibleRings_{250};
+	int volumeRingCount_{0};
 
-    // Growth parameters (Processing defaults)
-    float a_{0.05f};
-    float b_{0.06f};
-    float tubeGrow_{0.06f};
-    float tubeScale_{0.6f};
-    float maxT_{90.0f};
+	static float hyperNorm4(const Vec4f &v)
+	{
+		return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w);
+	}
 
-    // Tangent sampling delta (Processing uses 0.01)
-    float deltaTangent_{0.01f};
+	static float dot4(const Vec4f &a, const Vec4f &b)
+	{
+		return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+	}
 
-    // Rendering window (Processing RangeSlider defaults visibleSteps=250)
-    bool selectiveDisplay_{true};
-    int startRing_{0};
-    int visibleRings_{250};
+	Vec4f getSpiralPoint(float t) const
+	{
+		const float r = a_ * std::exp(b_ * t);
+		const float theta = (GR_ * m1_) * t;
+		const float phi = (E_ * m2_) * t;
+		const float chi = (PI_ * m3_) * t;
+		return Vec4f(
+			r * std::cos(chi),
+			r * std::sin(chi) * std::cos(phi),
+			r * std::sin(chi) * std::sin(phi) * std::cos(theta),
+			r * std::sin(chi) * std::sin(phi) * std::sin(theta));
+	}
 
-    // Vertex dots (Processing draws every other ring+v; we use a stride knob)
-    bool drawVertexDots_{true};
-    int pointStride_{1};
-    float pointSize_{8.0f};
-
-    static float hyperNorm4(const Vec4f &v)
+public:
+    // Soft-cell chamber along the spiral (Domokos et al., the nautilus shape in
+    // https://www.nature.com/articles/d41586-024-03099-6 ). Cross-section in the
+    // normal 3-space is smooth with two pinched tips. Many short steps follow the
+    // curve. Topologically each chamber is still a 4-ball. Written only into Mesh4D.
+    // The outer aperture has no septum.
+	void publishVolumeMesh(Mesh4D &mesh)
     {
-        return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w);
-    }
+        mesh.clear();
+        mesh.setPrimitiveType(Primitive4D::Pentachoron);
+		mesh.verticesGenerated.reserve(static_cast<size_t>(161 * 65));
 
-    static float dot4(const Vec4f &a, const Vec4f &b)
-    {
-        return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
-    }
+		const int chamberSteps[] = {16, 24, 32, 40, 48};
+		int totalSegments = 0;
+		std::vector<int> chamberStart;
+		for (int steps : chamberSteps)
+		{
+			chamberStart.push_back(totalSegments);
+			totalSegments += steps;
+		}
+		const int kRings = totalSegments + 1;
+		volumeRingCount_ = kRings;
 
-    float ringParamT(int ringIndex) const
-    {
-        if (tSteps_ <= 1)
+		const int windowStart = selectiveDisplay_
+									? std::max(0, std::min(startRing_, kRings - 1))
+									: 0;
+		const int windowCount = selectiveDisplay_
+									? std::max(1, std::min(visibleRings_, kRings - windowStart))
+									: kRings;
+		const int windowEnd = windowStart + windowCount;
+		auto ringVisible = [&](int ring)
+		{
+			return ring >= windowStart && ring < windowEnd;
+		};
+
+        auto frameAt = [&](float t, Vec4f &center, Vec4f &n1, Vec4f &n2, Vec4f &n3, float &radius)
         {
-            return 0.0f;
-        }
-        const float u = static_cast<float>(ringIndex) / static_cast<float>(tSteps_ - 1);
-        return u * maxT_;
-    }
-
-    Vec4f getSpiralPoint(float t) const
-    {
-        const float r = a_ * std::exp(b_ * t);
-
-        const float theta = (GR_ * m1_) * t;
-        const float phi = (E_ * m2_) * t;
-        const float chi = (PI_ * m3_) * t;
-
-        const float x = r * std::cos(chi);
-        const float y = r * std::sin(chi) * std::cos(phi);
-        const float z = r * std::sin(chi) * std::sin(phi) * std::cos(theta);
-        const float w = r * std::sin(chi) * std::sin(phi) * std::sin(theta);
-
-        return Vec4f(x, y, z, w);
-    }
-
-    void generateGeometry()
-    {
-        vertices_.clear();
-        hyperDists_.clear();
-
-        vertices_.reserve(static_cast<size_t>(tSteps_) * static_cast<size_t>(vSteps_));
-        hyperDists_.reserve(static_cast<size_t>(tSteps_) * static_cast<size_t>(vSteps_));
-
-        for (int i = 0; i < tSteps_; ++i)
-        {
-            const float t = (tSteps_ > 1)
-                                ? (static_cast<float>(i) / static_cast<float>(tSteps_ - 1)) * maxT_
-                                : 0.f;
-
-            const Vec4f center = getSpiralPoint(t);
-            const Vec4f nextP = getSpiralPoint(t + deltaTangent_);
-
-            Vec4f tangent = nextP - center;
+            center = getSpiralPoint(t);
+            Vec4f tangent = getSpiralPoint(t + deltaTangent_) - center;
             const float tMag = hyperNorm4(tangent);
             if (tMag > 1e-7f)
             {
                 tangent *= (1.f / tMag);
             }
 
-            // Choose a stable axis to build a basis orthogonal to tangent.
             Vec4f aAxis(1.f, 0.f, 0.f, 0.f);
-            const bool useY = (std::fabs(tangent.x) > 0.9f);
-            if (useY)
+            Vec4f bAxis(0.f, 1.f, 0.f, 0.f);
+            if (std::fabs(tangent.x) > 0.9f)
             {
                 aAxis = Vec4f(0.f, 1.f, 0.f, 0.f);
-            }
-
-            Vec4f bAxis(0.f, 1.f, 0.f, 0.f);
-            if (useY)
-            {
                 bAxis = Vec4f(0.f, 0.f, 1.f, 0.f);
             }
 
-            // n1 = normalize(aAxis - proj(tangent) * aAxis)
-            const float dot1 = dot4(aAxis, tangent);
-            Vec4f n1 = aAxis - tangent * dot1;
+            n1 = aAxis - tangent * dot4(aAxis, tangent);
             const float n1Mag = hyperNorm4(n1);
             if (n1Mag > 1e-7f)
             {
                 n1 *= (1.f / n1Mag);
             }
 
-            // n2 = normalize( (bAxis - proj(tangent) * bAxis) - proj(n1) )
-            const float dotT = dot4(bAxis, tangent);
-            Vec4f t2 = bAxis - tangent * dotT;
-
-            const float dotN1 = dot4(t2, n1);
-            Vec4f n2 = t2 - n1 * dotN1;
+            Vec4f t2 = bAxis - tangent * dot4(bAxis, tangent);
+            n2 = t2 - n1 * dot4(t2, n1);
             const float n2Mag = hyperNorm4(n2);
             if (n2Mag > 1e-7f)
             {
                 n2 *= (1.f / n2Mag);
             }
 
-            const float rTube = (a_ * std::exp(tubeGrow_ * t)) * tubeScale_;
-
-            for (int j = 0; j < vSteps_; ++j)
+            n3 = cross4(tangent, n1, n2);
+            const float n3Mag = hyperNorm4(n3);
+            if (n3Mag > 1e-7f)
             {
-                const float vAngle = (vSteps_ > 0)
-                                         ? (static_cast<float>(j) / static_cast<float>(vSteps_)) * (2.f * PI_)
-                                         : 0.f;
-
-                const float cv = std::cos(vAngle);
-                const float sv = std::sin(vAngle);
-
-                const Vec4f p = center + (n1 * (rTube * cv)) + (n2 * (rTube * sv));
-                vertices_.push_back(p);
-                hyperDists_.push_back(hyperNorm4(p));
+                n3 *= (1.f / n3Mag);
             }
-        }
-    }
 
-public:
-    Nautilus4D()
-    {
-        generateGeometry();
-    }
+            radius = (a_ * std::exp(tubeGrow_ * t)) * tubeScale_;
+        };
 
-	// ---- Runtime controls (non-ImGui) ----
-	// These exist so apps can drive the nautilus procedurally without reaching into ImGui state.
+		Vec4f prevN1;
+		Vec4f prevN2;
+		Vec4f prevN3;
+		bool haveFrame = false;
 
-	void setRingWindow(bool enabled)
-	{
-		selectiveDisplay_ = enabled;
-	}
+		for (int ring = 0; ring < kRings; ++ring)
+		{
+			const float t = (totalSegments > 0)
+								? (static_cast<float>(ring) / static_cast<float>(totalSegments)) * maxT_
+								: 0.f;
+			Vec4f center;
+			Vec4f n1;
+			Vec4f n2;
+			Vec4f n3;
+			float radius = 0.f;
+			frameAt(t, center, n1, n2, n3, radius);
+			if (haveFrame)
+			{
+				Vec4f tangent = getSpiralPoint(t + deltaTangent_) - center;
+				const float tMag = hyperNorm4(tangent);
+				if (tMag > 1e-7f)
+				{
+					tangent *= (1.f / tMag);
+				}
+				n1 = prevN1 - tangent * dot4(prevN1, tangent);
+				const float n1Mag = hyperNorm4(n1);
+				if (n1Mag > 1e-7f)
+				{
+					n1 *= (1.f / n1Mag);
+				}
+				n2 = prevN2 - tangent * dot4(prevN2, tangent) - n1 * dot4(prevN2, n1);
+				const float n2Mag = hyperNorm4(n2);
+				if (n2Mag > 1e-7f)
+				{
+					n2 *= (1.f / n2Mag);
+				}
+				n3 = cross4(tangent, n1, n2);
+				const float n3Mag = hyperNorm4(n3);
+				if (n3Mag > 1e-7f)
+				{
+					n3 *= (1.f / n3Mag);
+				}
+			}
+			prevN1 = n1;
+			prevN2 = n2;
+			prevN3 = n3;
+			haveFrame = true;
 
-	void setStartRing(int startRing)
-	{
-		startRing_ = startRing;
-	}
-
-	void setVisibleRings(int ringCount)
-	{
-		visibleRings_ = ringCount;
-	}
-
-	void showAllRings()
-	{
-		selectiveDisplay_ = false;
-	}
-
-	void setPointSize(float size)
-	{
-		pointSize_ = size;
-	}
-
-    // Update spiral angular multipliers; regenerates geometry if they change.
-    void updateMultipliers(float nm1, float nm2, float nm3)
-    {
-        const float eps = 1e-3f;
-        if (std::fabs(m1_ - nm1) > eps || std::fabs(m2_ - nm2) > eps || std::fabs(m3_ - nm3) > eps)
-        {
-            m1_ = nm1;
-            m2_ = nm2;
-            m3_ = nm3;
-            generateGeometry();
-        }
-    }
-
-    // Export a quad soup for the currently displayed ring window.
-    // This is intentionally "data only" so slicing code can remain decoupled.
-    void buildWorldQuadSoup(std::vector<Vec4f> &vertsWorld, std::vector<std::array<int, 4>> &quads) const
-    {
-        const int ringCount = selectiveDisplay_
-                                  ? std::max(1, std::min(visibleRings_, tSteps_))
-                                  : tSteps_;
-        const int startRing = std::max(0, std::min(startRing_, tSteps_ - 1));
-
-        buildWorldQuadSoupWindow(vertsWorld, quads, startRing, ringCount);
-    }
-
-    // Export centerline samples (world-space) and radius per ring for implicit-volume slicing.
-    void buildWorldCenterlineSamples(std::vector<Vec4f> &centersWorld, std::vector<float> &radii) const
-    {
-        const int ringCount = selectiveDisplay_
-                                  ? std::max(1, std::min(visibleRings_, tSteps_))
-                                  : tSteps_;
-        const int startRing = std::max(0, std::min(startRing_, tSteps_ - 1));
-
-        buildWorldCenterlineSamplesWindow(centersWorld, radii, startRing, ringCount);
-    }
-
-    void buildWorldCenterlineSamplesWindow(
-        std::vector<Vec4f> &centersWorld,
-        std::vector<float> &radii,
-        int startRing,
-        int ringCount) const
-    {
-        centersWorld.clear();
-        radii.clear();
-
-        if (tSteps_ <= 0)
-        {
-            return;
-        }
-
-        const int ringCountClamped = std::max(1, std::min(ringCount, tSteps_));
-        const int startRingClamped = std::max(0, std::min(startRing, tSteps_ - 1));
-
-        centersWorld.reserve(static_cast<size_t>(ringCountClamped));
-        radii.reserve(static_cast<size_t>(ringCountClamped));
-
-        for (int k = 0; k < ringCountClamped; ++k)
-        {
-            const int ringIdx = (startRingClamped + k) % tSteps_;
-            const float t = ringParamT(ringIdx);
-            const Vec4f centerLocal = getSpiralPoint(t);
-            const float rTube = (a_ * std::exp(tubeGrow_ * t)) * tubeScale_;
-
-            const Vec4f centerWorld = pos + rotationState.apply(centerLocal);
-            centersWorld.push_back(centerWorld);
-            radii.push_back(rTube);
-        }
-    }
-
-    void buildWorldQuadSoupWindow(
-        std::vector<Vec4f> &vertsWorld,
-        std::vector<std::array<int, 4>> &quads,
-        int startRing,
-        int ringCount) const
-    {
-        vertsWorld.clear();
-        quads.clear();
-
-        if (vertices_.empty() || tSteps_ <= 1 || vSteps_ <= 2)
-        {
-            return;
-        }
-
-        const int ringCountClamped = std::max(1, std::min(ringCount, tSteps_));
-        const int startRingClamped = std::max(0, std::min(startRing, tSteps_ - 1));
-
-        // Like Processing: renderWindow(startRing, ringCount) samples ringCount+1 rings.
-        const int ringsForSoup = ringCountClamped + 1;
-        const int vertsPerRing = vSteps_;
-        const size_t totalVerts = static_cast<size_t>(ringsForSoup) * static_cast<size_t>(vertsPerRing);
-        vertsWorld.reserve(totalVerts);
-
-        // Emit world vertices in (k,v) order for this window.
-        for (int k = 0; k <= ringCountClamped; ++k)
-        {
-            const int r = (startRingClamped + k) % tSteps_;
-            for (int v = 0; v < vSteps_; ++v)
+            mesh.verticesGenerated.push_back(center);
+            const int A = 16;
+            const int H = 4;
+            for (int h = 0; h < H; ++h)
             {
-                const int localIdx = r * vSteps_ + v;
-                const Vec4f vWorld = pos + rotationState.apply(vertices_[localIdx]);
-                vertsWorld.push_back(vWorld);
+                const float phi = 3.14159265f * static_cast<float>(h) / static_cast<float>(H - 1);
+                const float sp = std::sin(phi);
+                const float cp = std::cos(phi);
+                for (int a = 0; a < A; ++a)
+                {
+                    const float theta = (2.f * PI_) * static_cast<float>(a) / static_cast<float>(A);
+                    // Two cusps, at theta = 0 and pi. |sin|^0.4 is the soft-cell pinch:
+                    // smooth belly, pointed tips. Thickness in n3 uses the same pinch,
+                    // so the tips are sharp edges rather than cube corners.
+                    const float pinch = std::pow(std::fabs(std::sin(theta)), 0.4f);
+                    const float radial = radius * (0.08f + 0.92f * pinch);
+                    const float height = radius * 0.7f * pinch;
+                    mesh.verticesGenerated.push_back(
+                        center
+                        + n1 * (radial * std::cos(theta) * sp)
+                        + n2 * (radial * std::sin(theta) * sp)
+                        + n3 * (height * cp));
+                }
             }
         }
 
-        // Build quads between ring k and ring k+1, around v.
-        // Skip longitudinal stitching across the "physical end" (same condition as draw).
-        quads.reserve(static_cast<size_t>(ringCountClamped) * static_cast<size_t>(vSteps_));
-        for (int k = 0; k < ringCountClamped; ++k)
+        constexpr int A = 16;
+        constexpr int H = 4;
+        constexpr int kStride = 1 + A * H;
+        auto centerIndex = [&](int ring) { return ring * kStride; };
+        auto surfIndex = [&](int ring, int a, int h)
         {
-            const int actualRingIndex = (startRingClamped + k) % tSteps_;
-            const bool isPhysicalWrap = (actualRingIndex == tSteps_ - 1);
-            if (isPhysicalWrap)
+            return ring * kStride + 1 + h * A + a;
+        };
+
+        for (int ring = 0; ring < kRings; ++ring)
+        {
+            if (!ringVisible(ring))
             {
                 continue;
             }
-
-            for (int v = 0; v < vSteps_; ++v)
+            for (int h = 0; h < H; ++h)
             {
-                const int vNext = (v + 1) % vSteps_;
-
-                const int a = k * vSteps_ + v;
-                const int b = k * vSteps_ + vNext;
-                const int c = (k + 1) * vSteps_ + vNext;
-                const int d = (k + 1) * vSteps_ + v;
-
-                quads.push_back({a, b, c, d});
+                for (int a = 0; a < A; ++a)
+                {
+                    const int nextA = (a + 1) % A;
+                    mesh.elements.edges.emplace_back(surfIndex(ring, a, h), surfIndex(ring, nextA, h));
+                    if (h + 1 < H)
+                    {
+                        mesh.elements.edges.emplace_back(surfIndex(ring, a, h), surfIndex(ring, a, h + 1));
+                    }
+                    mesh.elements.edges.emplace_back(centerIndex(ring), surfIndex(ring, a, h));
+                }
+            }
+            if (ring == kRings - 1)
+            {
+                continue;
             }
         }
+
+        for (int ring = 0; ring < kRings - 1; ++ring)
+        {
+            if (!ringVisible(ring) || !ringVisible(ring + 1))
+            {
+                continue;
+            }
+            for (int h = 0; h < H; ++h)
+            {
+                for (int a = 0; a < A; ++a)
+                {
+                    mesh.elements.edges.emplace_back(surfIndex(ring, a, h), surfIndex(ring + 1, a, h));
+                }
+            }
+            for (int h = 0; h + 1 < H; ++h)
+            {
+                for (int a = 0; a < A; ++a)
+                {
+                    const int nextA = (a + 1) % A;
+                    const int v00 = surfIndex(ring, a, h);
+                    const int v10 = surfIndex(ring, nextA, h);
+                    const int v11 = surfIndex(ring + 1, nextA, h);
+                    const int v01 = surfIndex(ring + 1, a, h);
+                    mesh.elements.triangles.push_back(Triangle4D{{v00, v10, v11}});
+                    mesh.elements.triangles.push_back(Triangle4D{{v00, v11, v01}});
+                    const int w00 = surfIndex(ring, a, h + 1);
+                    mesh.elements.pentachora.push_back(Pentachoron4D{{
+                        centerIndex(ring), v00, v10, v11, w00}});
+                }
+            }
+        }
+
+        for (int start : chamberStart)
+        {
+            if (start >= kRings - 1 || !ringVisible(start))
+            {
+                continue;
+            }
+            const int mid = H / 2;
+            for (int a = 0; a < A; ++a)
+            {
+                const int nextA = (a + 1) % A;
+                mesh.elements.tetrahedra.push_back(Tetrahedron4D{{
+                    centerIndex(start),
+                    surfIndex(start, a, mid),
+                    surfIndex(start, nextA, mid),
+                    surfIndex(start, a, std::min(H - 1, mid + 1))}});
+            }
+        }
+
+        mesh.copyGeneratedToDeformed();
     }
 
-    // Geometry accessors for FProjection.hpp reducers.
-    const std::vector<Vec4f> &verticesLocal() const { return vertices_; }
-    const std::vector<float> &hyperDistsLocal() const { return hyperDists_; }
-    int tSteps() const { return tSteps_; }
-    int vSteps() const { return vSteps_; }
-    bool selectiveDisplay() const { return selectiveDisplay_; }
-    int startRing() const { return startRing_; }
-    int visibleRings() const { return visibleRings_; }
-    bool drawVertexDots() const { return drawVertexDots_; }
-    int pointStride() const { return pointStride_; }
-    float pointSize() const { return pointSize_; }
 
-    int projectionRingCount() const
+	int projectionStartRing() const
+	{
+		const int n = std::max(1, volumeRingCount_);
+		return std::max(0, std::min(startRing_, n - 1));
+	}
+
+	int visibleRingCountFor(int ringMax) const
+	{
+		if (!selectiveDisplay_)
+		{
+			return ringMax;
+		}
+		const int start = std::max(0, std::min(startRing_, std::max(0, ringMax - 1)));
+		return std::max(1, std::min(visibleRings_, ringMax - start));
+	}
+
+public:
+	void drawImGuiControls()
+	{
+		ImGui::Separator();
+		ImGui::Text("4D Nautilus (soft-cell chambers)");
+		const int ringMax = std::max(1, volumeRingCount_);
+		ImGui::Text("Total rings: %d", volumeRingCount_);
+		ImGui::Checkbox("Ring window only", &selectiveDisplay_);
+		ImGui::SameLine();
+		if (ImGui::Button("Show all rings"))
+		{
+			selectiveDisplay_ = false;
+		}
+		if (selectiveDisplay_)
+		{
+			ImGui::SliderInt("Start ring", &startRing_, 0, std::max(0, ringMax - 1));
+			visibleRings_ = std::max(1, std::min(visibleRings_, ringMax));
+			ImGui::SliderInt("Visible rings", &visibleRings_, 1, ringMax);
+			ImGui::Text(
+				"Drawing rings %d .. %d (%d rings)",
+				projectionStartRing(),
+				std::min(ringMax, projectionStartRing() + visibleRingCountFor(ringMax)) - 1,
+				visibleRingCountFor(ringMax));
+		}
+		else
+		{
+			ImGui::TextUnformatted("Drawing all rings");
+		}
+		ImGui::SliderFloat("m1 (GR)", &m1_, 0.1f, 10.f, "%.3f");
+		ImGui::SliderFloat("m2 (E)", &m2_, 0.1f, 10.f, "%.3f");
+		ImGui::SliderFloat("m3 (PI)", &m3_, 0.1f, 10.f, "%.3f");
+	}
+
+private:
+    static float det3(
+        float a, float b, float c,
+        float d, float e, float f,
+        float g, float h, float i)
     {
-        return selectiveDisplay_
-                   ? std::max(1, std::min(visibleRings_, tSteps_))
-                   : tSteps_;
+        return a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
     }
 
-    int projectionStartRing() const
+    static Vec4f cross4(const Vec4f &u, const Vec4f &v, const Vec4f &w)
     {
-        return std::max(0, std::min(startRing_, tSteps_ - 1));
+        return Vec4f(
+            det3(u.y, u.z, u.w, v.y, v.z, v.w, w.y, w.z, w.w),
+            -det3(u.x, u.z, u.w, v.x, v.z, v.w, w.x, w.z, w.w),
+            det3(u.x, u.y, u.w, v.x, v.y, v.w, w.x, w.y, w.w),
+            -det3(u.x, u.y, u.z, v.x, v.y, v.z, w.x, w.y, w.z));
     }
 
-    // Minimal ImGui controls to mirror the Processing UI.
-    void drawImGuiControls()
-    {
-        ImGui::Separator();
-        ImGui::Text("4D Nautilus (rings / spiral)");
-
-        ImGui::Text("Total rings: %d", tSteps_);
-        ImGui::Checkbox("Ring window only", &selectiveDisplay_);
-        ImGui::SameLine();
-        if (ImGui::Button("Show all rings"))
-        {
-            selectiveDisplay_ = false;
-        }
-
-        if (selectiveDisplay_)
-        {
-            ImGui::SliderInt("Start ring", &startRing_, 0, std::max(0, tSteps_ - 1));
-            visibleRings_ = std::max(1, std::min(visibleRings_, tSteps_));
-            ImGui::SliderInt("Visible rings", &visibleRings_, 1, tSteps_);
-            ImGui::Text(
-                "Drawing rings %d .. %d (%d rings)",
-                projectionStartRing(),
-                projectionStartRing() + projectionRingCount() - 1,
-                projectionRingCount());
-        }
-        else
-        {
-            ImGui::TextUnformatted("Drawing all rings");
-        }
-
-        bool regen = false;
-
-        regen |= ImGui::SliderFloat("m1 (GR)", &m1_, 0.1f, 10.0f, "%.3f");
-        regen |= ImGui::SliderFloat("m2 (E)", &m2_, 0.1f, 10.0f, "%.3f");
-        regen |= ImGui::SliderFloat("m3 (PI)", &m3_, 0.1f, 10.0f, "%.3f");
-
-        // Optional vertex dots (Processing draws "spheres" at sample points; we do GL points).
-        ImGui::Checkbox("Vertex points", &drawVertexDots_);
-        ImGui::SliderInt("Point stride", &pointStride_, 1, 6);
-        ImGui::Text("Point size: %.1f (fixed by app)", pointSize_);
-
-        if (regen)
-        {
-            generateGeometry();
-        }
-    }
 };

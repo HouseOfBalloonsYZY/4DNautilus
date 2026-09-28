@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Camera4D.hpp"
+#include "Object4D.hpp"
 #include "FProjectorPlane.hpp"
 
 #include "al/graphics/al_Graphics.hpp"

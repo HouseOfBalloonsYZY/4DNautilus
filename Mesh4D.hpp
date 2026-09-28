@@ -85,8 +85,11 @@ public:
 	/// Primary element kind for generators that emit one homogeneous type (optional hint).
 	Primitive4D primitive{Primitive4D::Edge};
 
-	/// Object-local generated vertices (authorship space).
-	std::vector<Vec4f> vertices;
+	/// Object-local points written by the generator.
+	std::vector<Vec4f> verticesGenerated;
+
+	/// Object-local points after fields. Identity field copies verticesGenerated.
+	std::vector<Vec4f> verticesDeformed;
 
 	/// World 4D positions (pose applied); parallel to vertices.
 	std::vector<Vec4f> verticesWorld;
@@ -112,12 +115,18 @@ public:
 	Primitive4D primitiveType() const { return primitive; }
 	void setPrimitiveType(Primitive4D p) { primitive = p; }
 
-	const std::vector<Vec4f> &verticesLocal() const { return vertices; }
+	const std::vector<Vec4f> &verticesLocal() const { return verticesGenerated; }
 	const std::vector<Vec4f> &verticesInWorld() const { return verticesWorld; }
 	const std::vector<Vec4f> &verticesInNav4D() const { return verticesNav4D; }
 	const Elements4D &elementsData() const { return elements; }
 
-	size_t vertexCount() const { return vertices.size(); }
+	size_t vertexCount() const { return verticesGenerated.size(); }
+
+	/// No field yet: deformed vertices match the generator output.
+	void copyGeneratedToDeformed()
+	{
+		verticesDeformed = verticesGenerated;
+	}
 
 	// --- Geometry generation (subclasses override) ---
 
@@ -139,26 +148,30 @@ public:
 	/// Ensure world / Nav4D buffers match vertices.size() (safe before update loops).
 	void syncVertexBuffers()
 	{
-		const size_t n = vertices.size();
+		const size_t n = verticesDeformed.size();
 		verticesWorld.resize(n);
 		verticesNav4D.resize(n);
 	}
 
-	/// World 4D from object-local + pose. Call when pose.pos or pose.rotationState changes.
+	/// World 4D from deformed local vertices + pose.
 	void updateWorld()
 	{
+		if (verticesDeformed.size() != verticesGenerated.size())
+		{
+			copyGeneratedToDeformed();
+		}
 		syncVertexBuffers();
 
-		for (size_t i = 0; i < vertices.size(); ++i)
+		for (size_t i = 0; i < verticesDeformed.size(); ++i)
 		{
-			verticesWorld[i] = pose.pos + pose.rotationState.apply(vertices[i]);
+			verticesWorld[i] = pose.pos + pose.rotationState.apply(verticesDeformed[i]);
 		}
 	}
 
 	/// Viewer-local 4D from world positions. Call each frame from FApp after Nav4D moves.
 	void updateNav4D(const Camera4D &nav)
 	{
-		if (verticesWorld.size() != vertices.size())
+		if (verticesWorld.size() != verticesDeformed.size())
 		{
 			updateWorld();
 		}
@@ -182,7 +195,8 @@ public:
 
 	void clear()
 	{
-		vertices.clear();
+		verticesGenerated.clear();
+		verticesDeformed.clear();
 		verticesWorld.clear();
 		verticesNav4D.clear();
 		elements.clear();

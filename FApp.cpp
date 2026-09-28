@@ -2,11 +2,11 @@
 #include "al/io/al_Imgui.hpp"
 #include "al/graphics/al_Shapes.hpp"
 
-#include "4DNautilusHypervolume.hpp"
 #include "FProjectorPlane.hpp"
 #include "FSlicer.hpp"
 #include "Camera4D.hpp"
 #include "Nautilus4D.hpp"
+#include "Scene4D.hpp"
 
 #include <array>
 #include <cmath>
@@ -42,9 +42,9 @@ al::Color nautilusGradientColor(float t)
 struct FourDApp : public App
 {
 	Camera4D camera4D;
-    //std::vector<Object4D> objects4D; // for potential future use with multiple objects, but currently just one Nautilus4D
 	Nautilus4D nautilus;
-	NautilusHypervolume4D hypervolume;
+	Mesh4D nautilusMesh;
+	Scene4D scene;
 
 	enum class RenderMode
 	{
@@ -74,6 +74,9 @@ struct FourDApp : public App
 
 		imguiInit();
 		navControl().disable();
+
+		nautilus.publishVolumeMesh(nautilusMesh);
+		scene.add(nautilusMesh);
 	}
 
 	void onAnimate(double dt) override
@@ -106,12 +109,15 @@ struct FourDApp : public App
 		g.clear(0.1);
 		g.depthTesting(true);
 
+		nautilus.publishVolumeMesh(nautilusMesh);
+		scene.prepare(camera4D);
+
 		ProjectorPlane projector(projectionSettings);
 
 		if (renderMode == RenderMode::Projection)
 		{
 			g.viewport(0, 0, fbWidth(), fbHeight());
-			drawNautilusProjection(g, projector);
+			drawSceneProjection(g, projector);
 
 			if (showWorldAxes)
 			{
@@ -123,7 +129,7 @@ struct FourDApp : public App
 			if (splitView)
 			{
 				g.viewport(0, 0, fbWidth() / 2, fbHeight());
-				drawNautilusProjection(g, projector);
+				drawSceneProjection(g, projector);
 				if (showWorldAxes)
 				{
 					projector.drawWorldAxes(g, camera4D);
@@ -136,16 +142,7 @@ struct FourDApp : public App
 				g.viewport(0, 0, fbWidth(), fbHeight());
 			}
 
-			std::vector<Vec4f> vertsWorld;
-			std::vector<std::array<int, 5>> simplices;
-			hypervolume.buildWorldSimplices(vertsWorld, simplices);
-
-			const HyperSliceResult slice = slice4SimplicesViewerLocal(
-				camera4D,
-				vertsWorld,
-				simplices,
-				sliceSettings);
-			drawHyperSlice(g, slice, sliceSettings);
+			drawSceneSlice(g);
 		}
 
 		g.viewport(0, 0, fbWidth(), fbHeight());
@@ -160,6 +157,86 @@ struct FourDApp : public App
 			r = -r;
 		}
 		return out;
+	}
+
+	void drawSceneProjection(Graphics &g, ProjectorPlane &projector)
+	{
+		Mesh lines;
+		lines.primitive(Mesh::LINES);
+		g.blending(true);
+		g.blendTrans();
+
+		for (Mesh4D *mesh : scene.meshes())
+		{
+			const std::vector<Vec4f> &local = mesh->verticesLocal();
+			const std::vector<Vec4f> &world = mesh->verticesInWorld();
+			float minD = std::numeric_limits<float>::max();
+			float maxD = 0.f;
+			for (const Vec4f &v : local)
+			{
+				const float d = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w);
+				minD = std::min(minD, d);
+				maxD = std::max(maxD, d);
+			}
+			if (maxD <= minD)
+			{
+				maxD = minD + 1.f;
+			}
+
+			for (const Edge4D &edge : mesh->elementsData().edges)
+			{
+				const size_t ia = static_cast<size_t>(edge.first);
+				const size_t ib = static_cast<size_t>(edge.second);
+				Vec3f a;
+				Vec3f b;
+				if (!projector.tryProjectWorld(camera4D, world[ia], a))
+				{
+					continue;
+				}
+				if (!projector.tryProjectWorld(camera4D, world[ib], b))
+				{
+					continue;
+				}
+				const float da = std::sqrt(local[ia].x * local[ia].x + local[ia].y * local[ia].y
+					+ local[ia].z * local[ia].z + local[ia].w * local[ia].w);
+				const float db = std::sqrt(local[ib].x * local[ib].x + local[ib].y * local[ib].y
+					+ local[ib].z * local[ib].z + local[ib].w * local[ib].w);
+				lines.color(nautilusGradientColor(clamp01((da - minD) / (maxD - minD))));
+				lines.vertex(a);
+				lines.color(nautilusGradientColor(clamp01((db - minD) / (maxD - minD))));
+				lines.vertex(b);
+			}
+		}
+
+		projector.drawLineMesh(g, lines);
+		g.blending(false);
+	}
+
+	void drawSceneSlice(Graphics &g)
+	{
+		for (Mesh4D *mesh : scene.meshes())
+		{
+			Slicer4D slicer(sliceSettings);
+			slicer.setVerticesWorld(mesh->verticesInWorld());
+			for (const Pentachoron4D &cell : mesh->elementsData().pentachora)
+			{
+				slicer.add4Cell(cell.i);
+			}
+			for (const Tetrahedron4D &tet : mesh->elementsData().tetrahedra)
+			{
+				slicer.add3Simplex(tet.i);
+			}
+			for (const Triangle4D &tri : mesh->elementsData().triangles)
+			{
+				slicer.add2Triangle(tri.i);
+			}
+			for (const Edge4D &edge : mesh->elementsData().edges)
+			{
+				slicer.add1Edge(edge.first, edge.second);
+			}
+			const Slicer4D::Result result = slicer.slice(camera4D);
+			slicer.draw(g, result);
+		}
 	}
 
 	void drawControlPanel(
@@ -184,6 +261,7 @@ struct FourDApp : public App
 			ImGui::RadioButton("Slicing", &mode, static_cast<int>(RenderMode::Slicing));
 			renderMode = static_cast<RenderMode>(mode);
 		}
+		ImGui::Checkbox("Split view", &splitView);
 
 		if (renderMode == RenderMode::Projection
 			|| (renderMode == RenderMode::Slicing && splitView))
@@ -200,7 +278,6 @@ struct FourDApp : public App
 
 		if (renderMode == RenderMode::Slicing)
 		{
-			ImGui::Checkbox("Split view", &splitView);
 			ImGui::SliderFloat("Slice w (viewer-local)", &sliceSettings.wPlane, -25.f, 25.f, "%.2f");
 			ImGui::SliderFloat("Slice scale", &sliceSettings.sliceScale, 1.f, 60.f, "%.1f");
 			ImGui::Checkbox("Slice solid", &sliceSettings.drawVolume);
@@ -229,18 +306,7 @@ struct FourDApp : public App
 			drawRotatePlaneButtons(planeLabels[i], i, uiRotateSpeedLocal, rotSpeedRad);
 		}
 
-		if (renderMode == RenderMode::Projection
-			|| (renderMode == RenderMode::Slicing && splitView))
-		{
-			nautilus.drawImGuiControls();
-		}
-
-		if (renderMode == RenderMode::Slicing)
-		{
-			ImGui::Separator();
-			ImGui::Text("Hypervolume (slicing)");
-			hypervolume.drawImGuiControls();
-		}
+		nautilus.drawImGuiControls();
 
 		ImGui::End();
 	}
@@ -293,141 +359,6 @@ struct FourDApp : public App
 			rotateSpeedLocal[static_cast<size_t>(plane)] += rotSpeedRad;
 		}
 		ImGui::PopID();
-	}
-
-	void drawNautilusProjection(Graphics &g, const ProjectorPlane &projector)
-	{
-		const std::vector<Vec4f> &verticesLocal = nautilus.verticesLocal();
-		const std::vector<float> &hyperDists = nautilus.hyperDistsLocal();
-		const int tSteps = nautilus.tSteps();
-		const int vSteps = nautilus.vSteps();
-		const int startRing = nautilus.projectionStartRing();
-		const int ringCount = nautilus.projectionRingCount();
-
-		if (verticesLocal.empty() || tSteps <= 0 || vSteps <= 0)
-		{
-			return;
-		}
-
-		const int ringCountClamped = std::max(1, std::min(ringCount, tSteps));
-		const int startRingClamped = std::max(0, std::min(startRing, tSteps - 1));
-		const int ringsForProj = ringCountClamped + 1;
-		const size_t windowVerts = static_cast<size_t>(ringsForProj) * static_cast<size_t>(vSteps);
-
-		std::vector<Vec3f> proj(windowVerts);
-		std::vector<float> dists(windowVerts);
-		std::vector<bool> visible(windowVerts, false);
-
-		float minD = std::numeric_limits<float>::max();
-		float maxD = std::numeric_limits<float>::lowest();
-
-		for (int k = 0; k <= ringCountClamped; ++k)
-		{
-			const int r = (startRingClamped + k) % tSteps;
-
-			for (int v = 0; v < vSteps; ++v)
-			{
-				const int localIdx = r * vSteps + v;
-				const size_t winIdx = static_cast<size_t>(k * vSteps + v);
-
-				const Vec4f vWorld = ProjectorPlane::objectToWorld(
-					nautilus,
-					verticesLocal[static_cast<size_t>(localIdx)]);
-
-				Vec3f p;
-				if (!projector.tryProjectWorld(camera4D, vWorld, p))
-				{
-					continue;
-				}
-
-				proj[winIdx] = p;
-				visible[winIdx] = true;
-				dists[winIdx] = hyperDists[static_cast<size_t>(localIdx)];
-
-				minD = std::min(minD, dists[winIdx]);
-				maxD = std::max(maxD, dists[winIdx]);
-			}
-		}
-
-		if (maxD <= minD)
-		{
-			maxD = minD + 1.f;
-		}
-
-		g.blending(true);
-		g.blendTrans();
-
-		Mesh lines;
-		lines.primitive(Mesh::LINES);
-
-		for (int k = 0; k < ringCountClamped; ++k)
-		{
-			for (int v = 0; v < vSteps; ++v)
-			{
-				const size_t curr = static_cast<size_t>(k * vSteps + v);
-				const size_t nextV = static_cast<size_t>(k * vSteps + ((v + 1) % vSteps));
-				const size_t nextT = static_cast<size_t>((k + 1) * vSteps + v);
-
-				if (!visible[curr])
-				{
-					continue;
-				}
-
-				const float t = clamp01((dists[curr] - minD) / (maxD - minD));
-				const al::Color c = nautilusGradientColor(t);
-
-				if (visible[nextV])
-				{
-					lines.color(c);
-					lines.vertex(proj[curr]);
-					lines.color(c);
-					lines.vertex(proj[nextV]);
-				}
-
-				const int actualRingIndex = (startRingClamped + k) % tSteps;
-				const bool isPhysicalWrap = (actualRingIndex == tSteps - 1);
-				if (!isPhysicalWrap && visible[nextT])
-				{
-					lines.color(c);
-					lines.vertex(proj[curr]);
-					lines.color(c);
-					lines.vertex(proj[nextT]);
-				}
-			}
-		}
-
-		Mesh points;
-		if (nautilus.drawVertexDots() && nautilus.pointStride() > 0)
-		{
-			points.primitive(Mesh::POINTS);
-			g.pointSize(nautilus.pointSize());
-
-			const int pointStride = std::max(1, nautilus.pointStride());
-			for (int k = 0; k < ringCountClamped; k += pointStride)
-			{
-				for (int v = 0; v < vSteps; v += pointStride)
-				{
-					const size_t idx = static_cast<size_t>(k * vSteps + v);
-					if (idx >= windowVerts || !visible[idx])
-					{
-						continue;
-					}
-
-					const float t = clamp01((dists[idx] - minD) / (maxD - minD));
-					points.color(nautilusGradientColor(t));
-					points.vertex(proj[idx]);
-				}
-			}
-		}
-
-		projector.drawLineMesh(g, lines);
-
-		if (nautilus.drawVertexDots() && !points.vertices().empty())
-		{
-			projector.drawLineMesh(g, points);
-		}
-
-		g.blending(false);
 	}
 
 	void resetNavigationInput()
